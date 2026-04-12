@@ -1,0 +1,14 @@
+__MACOSX/
+.serena/
+*.zip
+*.pyc
+__pycache__/
+.pytest_cache/
+
+hotmail-service/data/
+hotmail-service/output/
+hotmail-service/accounts.csv
+
+*.db
+*.sqlite
+*.sqlite3

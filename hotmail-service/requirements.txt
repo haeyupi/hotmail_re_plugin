@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+playwright
+pydantic
+pytest
+httpx
+requests

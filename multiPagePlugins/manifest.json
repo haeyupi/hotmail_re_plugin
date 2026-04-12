@@ -1,0 +1,85 @@
+{
+  "manifest_version": 3,
+  "name": "Multi-Page Automation",
+  "version": "1.1.0",
+  "description": "Automates multi-step OAuth registration workflow",
+  "permissions": [
+    "sidePanel",
+    "tabs",
+    "webNavigation",
+    "debugger",
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://auth0.openai.com/*",
+        "https://auth.openai.com/*",
+        "https://accounts.openai.com/*"
+      ],
+      "js": ["content/utils.js", "shared/oauth-flow.js", "shared/verification-flow.js", "content/signup-page.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mail.qq.com/*",
+        "https://wx.mail.qq.com/*"
+      ],
+      "js": ["content/utils.js", "shared/qq-mail.js", "content/qq-mail.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mail.163.com/*"
+      ],
+      "js": ["content/utils.js", "content/mail-163.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.2925.com/*"
+      ],
+      "js": ["content/utils.js", "shared/mail-2925.js", "content/2925-mail.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://duckduckgo.com/email/settings/autofill*"
+      ],
+      "js": ["content/utils.js", "content/duck-mail.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://relay.firefox.com/accounts/profile/*"
+      ],
+      "js": ["content/utils.js", "shared/email-provider.js", "content/relay-firefox.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

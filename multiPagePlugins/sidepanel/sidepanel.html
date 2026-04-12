@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Page Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+      </svg>
+      <h1>MultiPage</h1>
+    </div>
+    <div class="header-btns">
+      <div class="run-group">
+        <input type="number" id="input-run-count" class="run-count-input" value="1" min="1" max="50" title="Number of runs" />
+        <button id="btn-auto-run" class="btn btn-success" title="Run all steps automatically">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Auto
+        </button>
+        <button id="btn-stop" class="btn btn-danger" title="Stop current flow" disabled>Stop</button>
+      </div>
+      <button id="btn-reset" class="btn btn-ghost" title="Reset all steps">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        </svg>
+      </button>
+      <button id="btn-theme" class="theme-toggle" title="Toggle theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <section id="data-section">
+    <div class="data-card">
+      <div class="data-row">
+        <span class="data-label">CPA</span>
+        <div class="data-inline">
+          <input type="text" id="input-vps-url" class="data-input" placeholder="https://cpa.example.com" />
+          <button id="btn-save-cpa" class="btn btn-outline btn-sm" type="button">Save</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">CPA Key</span>
+        <div class="data-inline">
+          <input type="password" id="input-cpa-key" class="data-input" placeholder="CPA management key / password" />
+          <button id="btn-toggle-cpa-key" class="btn btn-outline btn-sm" type="button">Show</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Source</span>
+        <select id="select-email-provider" class="data-select">
+          <option value="mail_2925">2925邮箱</option>
+          <option value="hotmail">hotmail</option>
+          <option value="duckduckgo">duckduckgo</option>
+          <option value="cloudflare_temp_email">cloudflare_temp_email</option>
+          <option value="relay_firefox">relay_firefox</option>
+        </select>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Mail</span>
+        <select id="select-mail-provider" class="data-select">
+          <option value="2925">2925 Mail (www.2925.com)</option>
+          <option value="cloudflare_temp_email">Cloudflare Temp Email</option>
+          <option value="hotmail">Hotmail / Outlook API</option>
+          <option value="163">163 Mail (mail.163.com)</option>
+          <option value="qq">QQ Mail (wx.mail.qq.com)</option>
+          <option value="inbucket">Inbucket (custom host)</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-cloudflare-temp-email-url" style="display:none;">
+        <span class="data-label">Cloudflare</span>
+        <input type="text" id="input-cloudflare-temp-email-url" class="data-input" placeholder="https://mail.cloudflare.com/admin" />
+      </div>
+      <div class="data-row" id="row-hotmail-api-url" style="display:none;">
+        <span class="data-label">Hotmail API</span>
+        <input type="text" id="input-hotmail-api-url" class="data-input" placeholder="http://127.0.0.1:8001" />
+      </div>
+      <div class="data-row" id="row-hotmail-service-status" style="display:none;">
+        <span class="data-label">Service</span>
+        <div class="data-inline">
+          <span id="display-hotmail-service-status" class="data-value mono service-status">
+            <span id="hotmail-service-dot" class="service-dot service-dot-checking"></span>
+            <span id="hotmail-service-text">Unknown</span>
+          </span>
+          <button id="btn-open-hotmail-db-ui" class="btn btn-outline btn-sm" type="button">Open WebUI</button>
+          <button id="btn-copy-hotmail-start" class="btn btn-outline btn-sm" type="button">Copy Start Cmd</button>
+        </div>
+      </div>
+      <div class="data-row" id="row-hotmail-current-account" style="display:none;">
+        <span class="data-label">Current</span>
+        <span id="display-hotmail-current-account" class="data-value mono truncate">Idle</span>
+      </div>
+      <div class="data-row" id="row-hotmail-email" style="display:none;">
+        <span class="data-label">Hotmail Email</span>
+        <input type="text" id="input-hotmail-email" class="data-input" placeholder="your_email@hotmail.com" />
+      </div>
+      <div class="data-row" id="row-hotmail-password" style="display:none;">
+        <span class="data-label">Hotmail Password</span>
+        <input type="password" id="input-hotmail-password" class="data-input" placeholder="Outlook / Hotmail password" />
+      </div>
+      <div class="data-row" id="row-hotmail-access-method" style="display:none;">
+        <span class="data-label">Hotmail Access</span>
+        <select id="select-hotmail-access-method" class="data-select">
+          <option value="auto">auto</option>
+          <option value="graph">graph</option>
+          <option value="imap_new">imap_new</option>
+          <option value="imap_old">imap_old</option>
+          <option value="playwright">playwright</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-hotmail-client-id" style="display:none;">
+        <span class="data-label">Client ID</span>
+        <input type="text" id="input-hotmail-client-id" class="data-input" placeholder="Azure app client id" />
+      </div>
+      <div class="data-row" id="row-hotmail-refresh-token" style="display:none;">
+        <span class="data-label">Refresh Token</span>
+        <input type="password" id="input-hotmail-refresh-token" class="data-input" placeholder="Microsoft refresh token" />
+      </div>
+      <div class="data-row" id="row-hotmail-batch" style="display:none; align-items:flex-start;">
+        <span class="data-label">Batch</span>
+        <div class="data-inline" style="flex-direction:column; align-items:stretch;">
+          <textarea id="input-hotmail-batch" class="data-input hotmail-batch-input" placeholder="每行一个：email----password----client_id----refresh_token"></textarea>
+          <div class="data-inline">
+            <button id="btn-import-hotmail-db" class="btn btn-outline btn-sm" type="button">Import to DB</button>
+            <button id="btn-refresh-hotmail-db" class="btn btn-outline btn-sm" type="button">Refresh DB Summary</button>
+          </div>
+          <span id="display-hotmail-batch-count" class="data-value mono">0 accounts</span>
+          <span id="display-hotmail-db-summary" class="data-value mono db-summary">pending 0 | claimed 0 | success 0 | failed 0</span>
+        </div>
+      </div>
+      <div class="data-row" id="row-inbucket-host" style="display:none;">
+        <span class="data-label">Inbucket</span>
+        <input type="text" id="input-inbucket-host" class="data-input" placeholder="your-inbucket-host or https://your-inbucket-host" />
+      </div>
+      <div class="data-row" id="row-inbucket-mailbox" style="display:none;">
+        <span class="data-label">Mailbox</span>
+        <input type="text" id="input-inbucket-mailbox" class="data-input" placeholder="e.g. zju2001" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">Email</span>
+        <div class="data-inline">
+          <input type="text" id="input-email" class="data-input" placeholder="Paste signup email" />
+          <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">Auto</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Password</span>
+        <div class="data-inline">
+          <input type="password" id="input-password" class="data-input" placeholder="Leave blank to auto-generate" />
+          <button id="btn-toggle-password" class="btn btn-outline btn-sm" type="button">Show</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">OAuth</span>
+        <span id="display-oauth-url" class="data-value mono truncate">Waiting...</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Callback</span>
+        <span id="display-localhost-url" class="data-value mono truncate">Waiting...</span>
+      </div>
+    </div>
+    <div id="status-bar" class="status-bar">
+      <div class="status-dot"></div>
+      <span id="display-status">Ready</span>
+    </div>
+    <div id="auto-continue-bar" class="auto-continue-bar" style="display:none;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span id="auto-hint" class="auto-hint">Use Auto to fetch email, or paste manually, then continue</span>
+      <button id="btn-auto-continue" class="btn btn-primary btn-sm">Continue</button>
+    </div>
+  </section>
+
+  <section id="steps-section">
+    <div class="steps-header">
+      <span class="section-label">Workflow</span>
+      <span id="steps-progress" class="steps-progress">0 / 9</span>
+    </div>
+    <div class="steps-list">
+      <div class="step-row" data-step="1">
+        <div class="step-indicator" data-step="1"><span class="step-num">1</span></div>
+        <button class="step-btn" data-step="1">Get OAuth Link</button>
+        <span class="step-status" data-step="1"></span>
+      </div>
+      <div class="step-row" data-step="2">
+        <div class="step-indicator" data-step="2"><span class="step-num">2</span></div>
+        <button class="step-btn" data-step="2">Open Signup</button>
+        <span class="step-status" data-step="2"></span>
+      </div>
+      <div class="step-row" data-step="3">
+        <div class="step-indicator" data-step="3"><span class="step-num">3</span></div>
+        <button class="step-btn" data-step="3">Fill Email / Password</button>
+        <span class="step-status" data-step="3"></span>
+      </div>
+      <div class="step-row" data-step="4">
+        <div class="step-indicator" data-step="4"><span class="step-num">4</span></div>
+        <button class="step-btn" data-step="4">Get Signup Code</button>
+        <span class="step-status" data-step="4"></span>
+      </div>
+      <div class="step-row" data-step="5">
+        <div class="step-indicator" data-step="5"><span class="step-num">5</span></div>
+        <button class="step-btn" data-step="5">Fill Name / Birthday</button>
+        <span class="step-status" data-step="5"></span>
+      </div>
+      <div class="step-row" data-step="6">
+        <div class="step-indicator" data-step="6"><span class="step-num">6</span></div>
+        <button class="step-btn" data-step="6">Login via OAuth</button>
+        <span class="step-status" data-step="6"></span>
+      </div>
+      <div class="step-row" data-step="7">
+        <div class="step-indicator" data-step="7"><span class="step-num">7</span></div>
+        <button class="step-btn" data-step="7">Get Login Code</button>
+        <span class="step-status" data-step="7"></span>
+      </div>
+      <div class="step-row" data-step="8">
+        <div class="step-indicator" data-step="8"><span class="step-num">8</span></div>
+        <button class="step-btn" data-step="8">OAuth Auto Confirm</button>
+        <span class="step-status" data-step="8"></span>
+      </div>
+      <div class="step-row" data-step="9">
+        <div class="step-indicator" data-step="9"><span class="step-num">9</span></div>
+        <button class="step-btn" data-step="9">CPA Verify</button>
+        <span class="step-status" data-step="9"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="log-section">
+    <div class="log-header">
+      <span class="section-label">Console</span>
+      <button id="btn-clear-log" class="btn btn-ghost btn-xs" title="Clear log">Clear</button>
+    </div>
+    <div id="log-area"></div>
+  </section>
+
+  <div id="toast-container"></div>
+  <script src="../shared/email-provider.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
