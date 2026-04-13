@@ -30,13 +30,14 @@ const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const RUN_TIMEOUT_ERROR_MESSAGE = 'Registration exceeded time limit.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
-const MAX_REGISTRATION_DURATION_MS = 150000;
+const MAX_REGISTRATION_DURATION_MS = 120000;
 const ERROR_PAGE_TIMEOUT_BONUS_MS = 20000;
 const HOTMAIL_HEALTH_CACHE_TTL_MS = 10000;
 const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
 const STEP4_COMPLETION_TIMEOUT_MS = 420000;
 const STEP7_COMPLETION_TIMEOUT_MS = 240000;
 const MAX_ERROR_PAGE_RETRIES_PER_STEP = 2;
+const STEP4_ERROR_PAGE_RECOVERY_ABORT_MESSAGE = 'Step 4 OpenAI error page recovery triggered.';
 const STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE = 'Step 7 OpenAI error page recovery triggered.';
 
 const {
@@ -1404,11 +1405,26 @@ function clearStopRequest() {
 
 function clearRunTimeoutState() {
   runTimedOut = false;
+  runRetryCount = 0;
+  runStartTimeMs = 0;
   runTimeoutDeadlineMs = 0;
   if (runTimeoutHandle) {
     clearTimeout(runTimeoutHandle);
     runTimeoutHandle = null;
   }
+}
+
+function initializeRunTimeoutState() {
+  runTimedOut = false;
+  runRetryCount = 0;
+  runStartTimeMs = Date.now();
+  recomputeRunTimeoutDeadline();
+}
+
+function recomputeRunTimeoutDeadline() {
+  if (!runStartTimeMs) return;
+  runTimeoutDeadlineMs = runStartTimeMs + MAX_REGISTRATION_DURATION_MS + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
+  scheduleRunTimeout();
 }
 
 function scheduleRunTimeout() {
@@ -1426,9 +1442,17 @@ function scheduleRunTimeout() {
 }
 
 function extendRunTimeoutForErrorRefresh() {
-  if (!runTimeoutDeadlineMs) return;
-  runTimeoutDeadlineMs += ERROR_PAGE_TIMEOUT_BONUS_MS;
-  scheduleRunTimeout();
+  incrementRunRetryCount();
+}
+
+function incrementRunRetryCount() {
+  if (!runStartTimeMs) return;
+  runRetryCount += 1;
+  recomputeRunTimeoutDeadline();
+}
+
+function getCurrentRunTimeoutLimitMs() {
+  return MAX_REGISTRATION_DURATION_MS + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
 }
 
 function getCachedHotmailHealth(baseUrl) {
@@ -1538,6 +1562,8 @@ let stopRequested = false;
 let runTimedOut = false;
 let runTimeoutHandle = null;
 let runTimeoutDeadlineMs = 0;
+let runRetryCount = 0;
+let runStartTimeMs = 0;
 let hotmailHealthCache = null;
 
 // ============================================================
@@ -2271,6 +2297,50 @@ async function pollHotmailStep7WithActiveErrorRecovery(state, options = {}) {
   }
 }
 
+async function pollHotmailStep4WithActiveErrorRecovery(state, options = {}) {
+  const controller = new AbortController();
+  let watcherStopped = false;
+  let watcherTriggered = false;
+
+  const watcher = (async () => {
+    while (!watcherStopped) {
+      throwIfStopped();
+
+      const pageState = await getSignupPageState().catch(() => null);
+      if (pageState?.isErrorPage && pageState?.hasVisibleRetryButton) {
+        const retryResult = await triggerSignupErrorPageRetry(4, pageState, { previousStep: 3 });
+        if (retryResult.triggered) {
+          watcherTriggered = true;
+          controller.abort(STEP4_ERROR_PAGE_RECOVERY_ABORT_MESSAGE);
+          return;
+        }
+        if (retryResult.reason === 'max_check_attempts' || retryResult.reason === 'retry_limit') {
+          return;
+        }
+      }
+
+      await sleepWithStop(500);
+    }
+  })();
+
+  try {
+    return await pollCodeFromHotmail(4, state, {
+      ...options,
+      signal: controller.signal,
+      abortMessage: STEP4_ERROR_PAGE_RECOVERY_ABORT_MESSAGE,
+    });
+  } catch (err) {
+    if (watcherTriggered && err?.message === STEP4_ERROR_PAGE_RECOVERY_ABORT_MESSAGE) {
+      throw err;
+    }
+    throw err;
+  } finally {
+    watcherStopped = true;
+    controller.abort('done');
+    await Promise.allSettled([watcher]);
+  }
+}
+
 async function fetch2925MainEmailFromPage(options = {}) {
   throwIfStopped();
   const mail = getMailConfig({ mailProvider: MAIL_PROVIDER_2925 });
@@ -2503,8 +2573,7 @@ async function autoRunLoop(totalRuns) {
   for (let run = 1; run <= totalRuns; run++) {
     autoRunCurrentRun = run;
     clearRunTimeoutState();
-    runTimeoutDeadlineMs = Date.now() + MAX_REGISTRATION_DURATION_MS;
-    scheduleRunTimeout();
+    initializeRunTimeoutState();
 
     // Reset everything at the start of each run (keep VPS/mail settings)
     const prevState = await getState();
@@ -2653,12 +2722,13 @@ async function autoRunLoop(totalRuns) {
       if (isRunTimeoutError(err)) {
         failedRuns += 1;
         await markRunningStepsFailed();
-        await addLog(`Run ${run}/${totalRuns} failed: exceeded time limit`, 'error');
+        const timeoutLimitSeconds = Math.round(getCurrentRunTimeoutLimitMs() / 1000);
+        await addLog(`Run ${run}/${totalRuns} failed: exceeded mandatory time limit (${timeoutLimitSeconds}s, retries=${runRetryCount})`, 'error');
         const latestState = await getState();
         if (normalizeEmailProvider(latestState.emailProvider) === EMAIL_PROVIDER_HOTMAIL && latestState.currentHotmailDbEmail) {
           await markCurrentHotmailDbAccount('failed', {
             tag: 'failed-timeout',
-            note: 'registration exceeded dynamic time limit',
+            note: `registration exceeded mandatory time limit (${timeoutLimitSeconds}s, retries=${runRetryCount})`,
             openaiPassword: latestState.password || null,
           });
         }
@@ -3053,12 +3123,22 @@ async function executeStep4(state) {
 
     while (!result) {
       try {
-        result = await pollCodeFromHotmail(4, state, {
+        result = await pollHotmailStep4WithActiveErrorRecovery(state, {
           filterAfterTimestamp,
           maxWaitSeconds: 90,
           pollIntervalSeconds: 5,
         });
       } catch (err) {
+        if (err?.message === STEP4_ERROR_PAGE_RECOVERY_ABORT_MESSAGE) {
+          await addLog('Step 4: OpenAI timeout page detected during verification polling. Retry clicked immediately; restarting from step 3...', 'warn');
+          await sleepWithStop(1500);
+          await setStepStatus(3, 'pending');
+          await setStepStatus(4, 'pending');
+          await executeStep(3, { allowErrorPageRecovery: false });
+          await executeStep(4, { allowErrorPageRecovery: false });
+          return;
+        }
+
         if (!shouldRetryStep4VerificationWithResend({
           errorMessage: err.message,
           resendCount,
@@ -3071,6 +3151,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
+        incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3106,6 +3187,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
+        incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3141,6 +3223,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
+        incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3322,6 +3405,7 @@ async function executeStep7(state) {
         }
 
         resendCount += 1;
+        incrementRunRetryCount();
         await addLog(
           `Step 7: No login verification email found. Requesting resend ${resendCount}/${STEP7_RESEND_MAX_RESENDS} and retrying Hotmail polling...`,
           'warn'
