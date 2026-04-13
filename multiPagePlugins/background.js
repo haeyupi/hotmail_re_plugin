@@ -30,10 +30,11 @@ const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const RUN_TIMEOUT_ERROR_MESSAGE = 'Registration exceeded time limit.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
-const MAX_REGISTRATION_DURATION_MS = 120000;
+const DEFAULT_WORKFLOW_TIMEOUT_MS = 120000;
+const MIN_WORKFLOW_TIMEOUT_MS = 30000;
+const MAX_WORKFLOW_TIMEOUT_MS = 3600000;
 const ERROR_PAGE_TIMEOUT_BONUS_MS = 20000;
 const HOTMAIL_HEALTH_CACHE_TTL_MS = 10000;
-const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
 const STEP4_COMPLETION_TIMEOUT_MS = 420000;
 const STEP7_COMPLETION_TIMEOUT_MS = 240000;
 const MAX_ERROR_PAGE_RETRIES_PER_STEP = 2;
@@ -129,6 +130,9 @@ const DEFAULT_STATE = {
   errorPageRetryCounts: {},
   inbucketHost: '',
   inbucketMailbox: '',
+  workflowTimeoutMs: DEFAULT_WORKFLOW_TIMEOUT_MS,
+  runTimeoutDeadlineMs: 0,
+  stepDeadlineAt: 0,
   activeCloudflareMailbox: null,
   activeRelayMask: null,
 };
@@ -143,6 +147,20 @@ const HOTMAIL_PERSISTENT_KEYS = [
   'hotmailBatchRaw',
 ];
 const CPA_PERSISTENT_KEYS = ['cpaBaseUrl', 'cpaManagementKey'];
+const WORKFLOW_PERSISTENT_KEYS = ['workflowTimeoutMs'];
+
+function sanitizeWorkflowTimeoutMs(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_WORKFLOW_TIMEOUT_MS;
+  }
+  const rounded = Math.round(numeric);
+  return Math.min(MAX_WORKFLOW_TIMEOUT_MS, Math.max(MIN_WORKFLOW_TIMEOUT_MS, rounded));
+}
+
+function getWorkflowTimeoutMs(state = {}) {
+  return sanitizeWorkflowTimeoutMs(state.workflowTimeoutMs);
+}
 
 async function getPersistentCpaSettings() {
   try {
@@ -225,15 +243,41 @@ async function setPersistentHotmailSettings(updates = {}) {
   }
 }
 
+async function getPersistentWorkflowSettings() {
+  try {
+    const data = await chrome.storage.local.get(WORKFLOW_PERSISTENT_KEYS);
+    return {
+      workflowTimeoutMs: sanitizeWorkflowTimeoutMs(data.workflowTimeoutMs),
+    };
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to read persistent workflow settings:', err?.message || err);
+    return {
+      workflowTimeoutMs: DEFAULT_WORKFLOW_TIMEOUT_MS,
+    };
+  }
+}
+
+async function setPersistentWorkflowSettings(updates = {}) {
+  const payload = {};
+  if (updates.workflowTimeoutMs !== undefined) {
+    payload.workflowTimeoutMs = sanitizeWorkflowTimeoutMs(updates.workflowTimeoutMs);
+  }
+  if (Object.keys(payload).length) {
+    await chrome.storage.local.set(payload);
+  }
+}
+
 async function getState() {
   const state = await chrome.storage.session.get(null);
   const persistentCpa = await getPersistentCpaSettings();
   const persistentHotmail = await getPersistentHotmailSettings();
+  const persistentWorkflow = await getPersistentWorkflowSettings();
   return {
     ...DEFAULT_STATE,
     ...state,
     ...persistentCpa,
     ...persistentHotmail,
+    ...persistentWorkflow,
     cpaBaseUrl: normalizeCpaBaseUrl(persistentCpa.cpaBaseUrl || state.cpaBaseUrl || ''),
     cpaManagementKey: persistentCpa.cpaManagementKey || state.cpaManagementKey || '',
     hotmailApiBaseUrl: normalizeHotmailApiBaseUrl(
@@ -245,6 +289,9 @@ async function getState() {
     hotmailClientId: String(persistentHotmail.hotmailClientId || state.hotmailClientId || '').trim(),
     hotmailRefreshToken: persistentHotmail.hotmailRefreshToken || state.hotmailRefreshToken || '',
     hotmailBatchRaw: persistentHotmail.hotmailBatchRaw || state.hotmailBatchRaw || '',
+    workflowTimeoutMs: sanitizeWorkflowTimeoutMs(
+      persistentWorkflow.workflowTimeoutMs || state.workflowTimeoutMs || DEFAULT_STATE.workflowTimeoutMs
+    ),
   };
 }
 
@@ -453,6 +500,22 @@ async function setHotmailRefreshTokenState(hotmailRefreshToken, options = {}) {
     await setPersistentHotmailSettings({ hotmailRefreshToken: value });
   }
   broadcastDataUpdate({ hotmailRefreshToken: value });
+}
+
+async function setWorkflowTimeoutState(workflowTimeoutMs, options = {}) {
+  const { persist = true } = options;
+  const value = sanitizeWorkflowTimeoutMs(workflowTimeoutMs);
+  await setState({ workflowTimeoutMs: value });
+  if (runStartTimeMs) {
+    runBaseTimeoutMs = value;
+    recomputeRunTimeoutDeadline();
+    await setState({ runTimeoutDeadlineMs });
+    broadcastDataUpdate({ runTimeoutDeadlineMs });
+  }
+  if (persist) {
+    await setPersistentWorkflowSettings({ workflowTimeoutMs: value });
+  }
+  broadcastDataUpdate({ workflowTimeoutMs: value });
 }
 
 async function setHotmailBatchRawState(hotmailBatchRaw, options = {}) {
@@ -686,6 +749,7 @@ async function resetState() {
     'currentHotmailDbEmail',
     'inbucketHost',
     'inbucketMailbox',
+    'workflowTimeoutMs',
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
@@ -712,6 +776,7 @@ async function resetState() {
     currentHotmailDbEmail: prev.currentHotmailDbEmail || '',
     inbucketHost: prev.inbucketHost || '',
     inbucketMailbox: prev.inbucketMailbox || '',
+    workflowTimeoutMs: sanitizeWorkflowTimeoutMs(prev.workflowTimeoutMs || DEFAULT_STATE.workflowTimeoutMs),
   });
 }
 
@@ -1338,7 +1403,7 @@ async function triggerSignupErrorPageRetry(step, pageState = null, options = {})
 
   currentCounts[String(currentStep)] = retryCount + 1;
   await setState({ errorPageRetryCounts: currentCounts });
-  extendRunTimeoutForErrorRefresh();
+  await extendRunTimeoutForErrorRefresh();
 
   const rollbackSuffix = previousStep ? ` and rolling back to step ${previousStep}` : '';
   await addLog(
@@ -1379,12 +1444,19 @@ async function setStepStatus(step, status) {
   const state = await getState();
   const statuses = { ...state.stepStatuses };
   statuses[step] = status;
-  await setState({ stepStatuses: statuses, currentStep: step });
+  const updates = { stepStatuses: statuses, currentStep: step };
+  if (status !== 'running') {
+    updates.stepDeadlineAt = 0;
+  }
+  await setState(updates);
   // Broadcast to side panel
   chrome.runtime.sendMessage({
     type: 'STEP_STATUS_CHANGED',
     payload: { step, status },
   }).catch(() => {});
+  if (status !== 'running') {
+    broadcastDataUpdate({ stepDeadlineAt: 0 });
+  }
 }
 
 function isStopError(error) {
@@ -1395,15 +1467,14 @@ function isStopError(error) {
 function isRunTimeoutError(error) {
   const message = typeof error === 'string' ? error : error?.message;
   return message === RUN_TIMEOUT_ERROR_MESSAGE
-    || message === 'Registration exceeded 120s limit.'
-    || message === 'Registration exceeded 150s limit.';
+    || /Registration exceeded \d+s limit\./.test(String(message || ''));
 }
 
 function clearStopRequest() {
   stopRequested = false;
 }
 
-function clearRunTimeoutState() {
+async function clearRunTimeoutState() {
   runTimedOut = false;
   runRetryCount = 0;
   runStartTimeMs = 0;
@@ -1412,18 +1483,23 @@ function clearRunTimeoutState() {
     clearTimeout(runTimeoutHandle);
     runTimeoutHandle = null;
   }
+  await setState({ runTimeoutDeadlineMs: 0 });
+  broadcastDataUpdate({ runTimeoutDeadlineMs: 0 });
 }
 
-function initializeRunTimeoutState() {
+async function initializeRunTimeoutState(state = {}) {
   runTimedOut = false;
   runRetryCount = 0;
   runStartTimeMs = Date.now();
+  runBaseTimeoutMs = getWorkflowTimeoutMs(state);
   recomputeRunTimeoutDeadline();
+  await setState({ runTimeoutDeadlineMs });
+  broadcastDataUpdate({ runTimeoutDeadlineMs });
 }
 
 function recomputeRunTimeoutDeadline() {
   if (!runStartTimeMs) return;
-  runTimeoutDeadlineMs = runStartTimeMs + MAX_REGISTRATION_DURATION_MS + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
+  runTimeoutDeadlineMs = runStartTimeMs + runBaseTimeoutMs + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
   scheduleRunTimeout();
 }
 
@@ -1441,18 +1517,20 @@ function scheduleRunTimeout() {
   }, remainingMs);
 }
 
-function extendRunTimeoutForErrorRefresh() {
-  incrementRunRetryCount();
+async function extendRunTimeoutForErrorRefresh() {
+  await incrementRunRetryCount();
 }
 
-function incrementRunRetryCount() {
+async function incrementRunRetryCount() {
   if (!runStartTimeMs) return;
   runRetryCount += 1;
   recomputeRunTimeoutDeadline();
+  await setState({ runTimeoutDeadlineMs });
+  broadcastDataUpdate({ runTimeoutDeadlineMs });
 }
 
 function getCurrentRunTimeoutLimitMs() {
-  return MAX_REGISTRATION_DURATION_MS + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
+  return runBaseTimeoutMs + (ERROR_PAGE_TIMEOUT_BONUS_MS * runRetryCount);
 }
 
 function getCachedHotmailHealth(baseUrl) {
@@ -1564,6 +1642,7 @@ let runTimeoutHandle = null;
 let runTimeoutDeadlineMs = 0;
 let runRetryCount = 0;
 let runStartTimeMs = 0;
+let runBaseTimeoutMs = DEFAULT_WORKFLOW_TIMEOUT_MS;
 let hotmailHealthCache = null;
 
 // ============================================================
@@ -1703,6 +1782,9 @@ async function handleMessage(message, sender) {
       if (message.payload.cpaBaseUrl !== undefined) updates.cpaBaseUrl = normalizeCpaBaseUrl(message.payload.cpaBaseUrl);
       if (message.payload.cpaManagementKey !== undefined) updates.cpaManagementKey = message.payload.cpaManagementKey;
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
+      if (message.payload.workflowTimeoutMs !== undefined) {
+        await setWorkflowTimeoutState(message.payload.workflowTimeoutMs);
+      }
       if (message.payload.emailProvider !== undefined) {
         updates.emailProvider = normalizeEmailProvider(message.payload.emailProvider);
       }
@@ -1848,7 +1930,7 @@ async function handleStepData(step, payload) {
 const stepWaiters = new Map();
 let resumeWaiter = null;
 
-function waitForStepComplete(step, timeoutMs = 120000) {
+function waitForStepComplete(step, timeoutMs = DEFAULT_WORKFLOW_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     throwIfStopped();
     const timer = setTimeout(() => {
@@ -1909,14 +1991,14 @@ async function triggerRunTimeout() {
   }
 }
 
-function getStepCompletionTimeoutMs(step) {
+function getStepCompletionTimeoutMs(step, state = {}) {
   switch (Number(step)) {
     case 4:
       return STEP4_COMPLETION_TIMEOUT_MS;
     case 7:
       return STEP7_COMPLETION_TIMEOUT_MS;
     default:
-      return DEFAULT_STEP_COMPLETION_TIMEOUT_MS;
+      return getWorkflowTimeoutMs(state);
   }
 }
 
@@ -1946,6 +2028,7 @@ async function requestStop() {
   await markRunningStepsStopped();
   autoRunActive = false;
   await setState({ autoRunning: false });
+  await clearRunTimeoutState();
   await resetClaimedHotmailIfIdle({ force: true, reason: 'flow stopped' });
   chrome.runtime.sendMessage({
     type: 'AUTO_RUN_STATUS',
@@ -1962,6 +2045,11 @@ async function executeStep(step, options = {}) {
   console.log(LOG_PREFIX, `Executing step ${step}`);
   throwIfStopped();
   await setStepStatus(step, 'running');
+  const currentState = await getState();
+  const stepTimeoutMs = getStepCompletionTimeoutMs(step, currentState);
+  const stepDeadlineAt = Date.now() + stepTimeoutMs;
+  await setState({ stepDeadlineAt });
+  broadcastDataUpdate({ stepDeadlineAt });
   await addLog(`Step ${step} started`);
   await humanStepDelay();
 
@@ -2020,7 +2108,8 @@ async function executeStep(step, options = {}) {
  */
 async function executeStepAndWait(step, delayAfter = 2000) {
   throwIfStopped();
-  const promise = waitForStepComplete(step, getStepCompletionTimeoutMs(step));
+  const state = await getState();
+  const promise = waitForStepComplete(step, getStepCompletionTimeoutMs(step, state));
   await executeStep(step);
   await promise;
   // Extra delay for page transitions / DOM updates
@@ -2572,8 +2661,8 @@ async function autoRunLoop(totalRuns) {
 
   for (let run = 1; run <= totalRuns; run++) {
     autoRunCurrentRun = run;
-    clearRunTimeoutState();
-    initializeRunTimeoutState();
+    await clearRunTimeoutState();
+    await initializeRunTimeoutState(await getState());
 
     // Reset everything at the start of each run (keep VPS/mail settings)
     const prevState = await getState();
@@ -2593,6 +2682,8 @@ async function autoRunLoop(totalRuns) {
       currentHotmailDbEmail: '',
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
+      workflowTimeoutMs: prevState.workflowTimeoutMs,
+      runTimeoutDeadlineMs,
       autoRunning: true,
     };
     await resetState();
@@ -2738,7 +2829,7 @@ async function autoRunLoop(totalRuns) {
       failedRuns += 1;
       await addLog(`Run ${run}/${totalRuns} failed: ${err.message}`, 'error');
     } finally {
-      clearRunTimeoutState();
+      await clearRunTimeoutState();
     }
   }
 
@@ -3151,7 +3242,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
-        incrementRunRetryCount();
+        await incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3187,7 +3278,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
-        incrementRunRetryCount();
+        await incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3223,7 +3314,7 @@ async function executeStep4(state) {
         const currentRound = resendCount + 1;
         const nextRound = currentRound + 1;
         resendCount += 1;
-        incrementRunRetryCount();
+        await incrementRunRetryCount();
         await addLog(
           `Step 4: No verification email found after polling round ${currentRound}/5. Requesting resend ${resendCount}/4 and starting round ${nextRound}/5...`,
           'warn'
@@ -3405,7 +3496,7 @@ async function executeStep7(state) {
         }
 
         resendCount += 1;
-        incrementRunRetryCount();
+        await incrementRunRetryCount();
         await addLog(
           `Step 7: No login verification email found. Requesting resend ${resendCount}/${STEP7_RESEND_MAX_RESENDS} and retrying Hotmail polling...`,
           'warn'
@@ -3508,6 +3599,7 @@ async function executeStep8(state) {
     throw new Error('No OAuth URL. Complete step 1 first.');
   }
 
+  const workflowTimeoutMs = getWorkflowTimeoutMs(state);
   await addLog('Step 8: Preparing consent confirmation...');
 
   return new Promise((resolve, reject) => {
@@ -3554,8 +3646,8 @@ async function executeStep8(state) {
       timeout = setTimeout(() => {
         cleanupListener();
         resolved = true;
-        reject(new Error('Loopback callback URL not captured after 120s. Step 8 click may have been blocked.'));
-      }, 120000);
+        reject(new Error(`Loopback callback URL not captured after ${Math.round(workflowTimeoutMs / 1000)}s. Step 8 click may have been blocked.`));
+      }, workflowTimeoutMs);
     };
 
     (async () => {
@@ -3618,6 +3710,7 @@ async function executeStep9(state) {
     throw new Error('No oauth state found. Complete step 1 first.');
   }
 
+  const workflowTimeoutMs = getWorkflowTimeoutMs(state);
   await addLog('Step 9: Uploading callback URL to CPA API...');
   await callCpaApi('/v0/management/oauth-callback', {
     method: 'POST',
@@ -3629,7 +3722,7 @@ async function executeStep9(state) {
     },
   });
 
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + workflowTimeoutMs;
   while (Date.now() < deadline) {
     const statusResult = await callCpaApi(`/v0/management/get-auth-status?state=${encodeURIComponent(state.oauthState)}`, {
       method: 'GET',

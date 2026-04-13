@@ -59,6 +59,21 @@
         </div>
       </div>
       <div class="data-row">
+        <span class="data-label">Timeout</span>
+        <div class="data-inline">
+          <input type="number" id="input-workflow-timeout-seconds" class="data-input" min="30" max="3600" step="10" placeholder="120" />
+          <span class="data-suffix mono">sec</span>
+          <button id="btn-save-timeout" class="btn btn-outline btn-sm" type="button">Save</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Timer</span>
+        <div class="countdown-grid">
+          <span id="display-step-countdown" class="data-value mono countdown-pill is-idle">Step Idle</span>
+          <span id="display-run-countdown" class="data-value mono countdown-pill is-idle">Run Idle</span>
+        </div>
+      </div>
+      <div class="data-row">
         <span class="data-label">Source</span>
         <select id="select-email-provider" class="data-select">
           <option value="mail_2925">2925邮箱</option>

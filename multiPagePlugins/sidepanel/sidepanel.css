@@ -275,6 +275,47 @@ header {
   font-size: 12px;
 }
 
+.data-suffix {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.countdown-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.countdown-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-muted);
+}
+
+.countdown-pill.is-live {
+  color: var(--text-primary);
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.countdown-pill.is-warning {
+  color: var(--orange);
+  border-color: rgba(234, 88, 12, 0.3);
+  background: var(--orange-soft);
+}
+
+.countdown-pill.is-idle {
+  color: var(--text-muted);
+}
+
 .truncate {
   overflow: hidden;
   text-overflow: ellipsis;

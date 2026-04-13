@@ -30,6 +30,10 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const inputCpaKey = document.getElementById('input-cpa-key');
 const btnToggleCpaKey = document.getElementById('btn-toggle-cpa-key');
+const inputWorkflowTimeoutSeconds = document.getElementById('input-workflow-timeout-seconds');
+const btnSaveTimeout = document.getElementById('btn-save-timeout');
+const displayStepCountdown = document.getElementById('display-step-countdown');
+const displayRunCountdown = document.getElementById('display-run-countdown');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const selectEmailProvider = document.getElementById('select-email-provider');
 const rowCloudflareTempEmailUrl = document.getElementById('row-cloudflare-temp-email-url');
@@ -66,7 +70,15 @@ const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
 const btnSaveCpa = document.getElementById('btn-save-cpa');
+const DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 120;
+const MIN_WORKFLOW_TIMEOUT_SECONDS = 30;
+const MAX_WORKFLOW_TIMEOUT_SECONDS = 3600;
 let hotmailServiceStatusTimer = null;
+let countdownTimer = null;
+const countdownState = {
+  stepDeadlineAt: 0,
+  runTimeoutDeadlineMs: 0,
+};
 
 const {
   DEFAULT_CLOUDFLARE_TEMP_EMAIL_ADMIN_URL = 'https://mail.cloudflare.com/admin',
@@ -131,6 +143,67 @@ function dismissToast(toast) {
   toast.addEventListener('animationend', () => toast.remove());
 }
 
+function normalizeWorkflowTimeoutSeconds(value) {
+  const numeric = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_WORKFLOW_TIMEOUT_SECONDS;
+  }
+  return Math.min(MAX_WORKFLOW_TIMEOUT_SECONDS, Math.max(MIN_WORKFLOW_TIMEOUT_SECONDS, numeric));
+}
+
+function getWorkflowTimeoutMsFromInput() {
+  const seconds = normalizeWorkflowTimeoutSeconds(inputWorkflowTimeoutSeconds.value);
+  inputWorkflowTimeoutSeconds.value = String(seconds);
+  return seconds * 1000;
+}
+
+function setWorkflowTimeoutInputFromMs(value) {
+  const seconds = normalizeWorkflowTimeoutSeconds(
+    Math.round((Number(value) || (DEFAULT_WORKFLOW_TIMEOUT_SECONDS * 1000)) / 1000)
+  );
+  inputWorkflowTimeoutSeconds.value = String(seconds);
+}
+
+function formatCountdown(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function renderCountdownPill(element, label, deadlineAt) {
+  if (!element) return;
+  const remainingMs = Math.max(0, Number(deadlineAt || 0) - Date.now());
+  element.classList.remove('is-live', 'is-warning', 'is-idle');
+  if (!deadlineAt) {
+    element.textContent = `${label} Idle`;
+    element.classList.add('is-idle');
+    return;
+  }
+  element.textContent = `${label} ${formatCountdown(remainingMs)}`;
+  element.classList.add(remainingMs <= 30000 ? 'is-warning' : 'is-live');
+}
+
+function updateCountdownDisplay(state = null) {
+  if (state?.stepDeadlineAt !== undefined) {
+    countdownState.stepDeadlineAt = Number(state.stepDeadlineAt) || 0;
+  }
+  if (state?.runTimeoutDeadlineMs !== undefined) {
+    countdownState.runTimeoutDeadlineMs = Number(state.runTimeoutDeadlineMs) || 0;
+  }
+  renderCountdownPill(displayStepCountdown, 'Step', countdownState.stepDeadlineAt);
+  renderCountdownPill(displayRunCountdown, 'Run', countdownState.runTimeoutDeadlineMs);
+}
+
+function startCountdownTicker() {
+  if (countdownTimer) return;
+  countdownTimer = setInterval(() => updateCountdownDisplay(), 1000);
+}
+
 // ============================================================
 // State Restore on load
 // ============================================================
@@ -158,6 +231,7 @@ async function restoreState() {
     if (state.cpaManagementKey !== undefined) {
       inputCpaKey.value = state.cpaManagementKey || '';
     }
+    setWorkflowTimeoutInputFromMs(state.workflowTimeoutMs);
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
     }
@@ -218,6 +292,7 @@ async function restoreState() {
     }
 
     updateStatusDisplay(state);
+    updateCountdownDisplay(state);
     updateProgressCounter();
     await initialHotmailStatusRefresh;
     await refreshHotmailDbSummary().catch(() => {});
@@ -634,6 +709,7 @@ async function persistFormState() {
   const settingsPayload = {
     cpaBaseUrl: inputVpsUrl.value.trim(),
     cpaManagementKey: inputCpaKey.value,
+    workflowTimeoutMs: getWorkflowTimeoutMsFromInput(),
     customPassword: inputPassword.value,
     emailProvider: getSelectedEmailProvider(),
     mailProvider: selectMailProvider.value,
@@ -798,6 +874,15 @@ btnSaveCpa.addEventListener('click', async () => {
   }
 });
 
+btnSaveTimeout.addEventListener('click', async () => {
+  try {
+    await persistFormState();
+    showToast('Timeout saved locally', 'success', 2000);
+  } catch (err) {
+    showToast(`Save timeout failed: ${err.message}`, 'error');
+  }
+});
+
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
   await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
@@ -848,6 +933,7 @@ btnReset.addEventListener('click', async () => {
     btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
     autoContinueBar.style.display = 'none';
     updateStopButtonState(false);
+    updateCountdownDisplay({ stepDeadlineAt: 0, runTimeoutDeadlineMs: 0 });
     updateButtonStates();
     updateProgressCounter();
     updateMailProviderUI();
@@ -867,6 +953,10 @@ inputEmail.addEventListener('change', async () => {
 
 inputVpsUrl.addEventListener('change', persistFormState);
 inputCpaKey.addEventListener('change', persistFormState);
+inputWorkflowTimeoutSeconds.addEventListener('change', async () => {
+  getWorkflowTimeoutMsFromInput();
+  await persistFormState();
+});
 inputPassword.addEventListener('change', persistFormState);
 inputCloudflareTempEmailUrl.addEventListener('change', async () => {
   updateAutoContinueHint();
@@ -927,7 +1017,10 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'STEP_STATUS_CHANGED': {
       const { step, status } = message.payload;
       updateStepUI(step, status);
-      chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(updateStatusDisplay);
+      chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then((state) => {
+        updateStatusDisplay(state);
+        updateCountdownDisplay(state);
+      });
       if (status === 'completed') {
         chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
           syncPasswordField(state);
@@ -958,6 +1051,7 @@ chrome.runtime.onMessage.addListener((message) => {
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
       updateStopButtonState(false);
       updateProgressCounter();
+      updateCountdownDisplay({ stepDeadlineAt: 0 });
       updateMailProviderUI();
       updateAutoContinueHint();
       break;
@@ -1000,6 +1094,12 @@ chrome.runtime.onMessage.addListener((message) => {
       }
       if (message.payload.hotmailApiBaseUrl !== undefined) {
         inputHotmailApiUrl.value = message.payload.hotmailApiBaseUrl || '';
+      }
+      if (message.payload.workflowTimeoutMs !== undefined) {
+        setWorkflowTimeoutInputFromMs(message.payload.workflowTimeoutMs);
+      }
+      if (message.payload.stepDeadlineAt !== undefined || message.payload.runTimeoutDeadlineMs !== undefined) {
+        updateCountdownDisplay(message.payload);
       }
       if (message.payload.password !== undefined) {
         inputPassword.value = message.payload.password || '';
@@ -1089,6 +1189,7 @@ btnTheme.addEventListener('click', () => {
 // ============================================================
 
 initTheme();
+startCountdownTicker();
 restoreState().then(() => {
   syncPasswordToggleLabel();
   syncCpaKeyToggleLabel();
