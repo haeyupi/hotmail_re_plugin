@@ -37,6 +37,7 @@ const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
 const STEP4_COMPLETION_TIMEOUT_MS = 420000;
 const STEP7_COMPLETION_TIMEOUT_MS = 240000;
 const MAX_ERROR_PAGE_RETRIES_PER_STEP = 2;
+const STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE = 'Step 7 OpenAI error page recovery triggered.';
 
 const {
   DEFAULT_CLOUDFLARE_TEMP_EMAIL_ADMIN_URL = 'https://mail.cloudflare.com/admin',
@@ -1297,33 +1298,10 @@ async function recoverFromSignupErrorPage(step) {
   }
 
   const pageState = await getSignupPageState();
-  if (!pageState.isErrorPage || !pageState.hasVisibleRetryButton) {
+  const retryResult = await triggerSignupErrorPageRetry(currentStep, pageState, { previousStep });
+  if (!retryResult.triggered) {
     return false;
   }
-  if (/max_check_attempts/i.test(String(pageState.errorMessage || ''))) {
-    await addLog(`Step ${currentStep}: OpenAI error page indicates max_check_attempts. Marking step as failed without retry.`, 'error');
-    return false;
-  }
-
-  const state = await getState();
-  const currentCounts = { ...(state.errorPageRetryCounts || {}) };
-  const retryCount = Number(currentCounts[String(currentStep)] || 0);
-  if (retryCount >= MAX_ERROR_PAGE_RETRIES_PER_STEP) {
-    await addLog(`Step ${currentStep}: OpenAI error page retry limit reached (${MAX_ERROR_PAGE_RETRIES_PER_STEP}/${MAX_ERROR_PAGE_RETRIES_PER_STEP}). Marking step as failed.`, 'error');
-    return false;
-  }
-  currentCounts[String(currentStep)] = retryCount + 1;
-  await setState({ errorPageRetryCounts: currentCounts });
-  extendRunTimeoutForErrorRefresh();
-
-  await addLog(`Step ${currentStep}: Detected OpenAI error page (${pageState.errorMessage || 'unknown error'}). Clicking retry and rolling back to step ${previousStep}. Auto retry ${retryCount + 1}/${MAX_ERROR_PAGE_RETRIES_PER_STEP}.`, 'warn');
-  await sendToContentScript('signup-page', {
-    type: 'RETRY_ERROR_PAGE',
-    step: currentStep,
-    source: 'background',
-    reportStepError: false,
-    payload: {},
-  });
   await sleepWithStop(2000);
 
   await setStepStatus(previousStep, 'pending');
@@ -1331,6 +1309,50 @@ async function recoverFromSignupErrorPage(step) {
   await executeStep(previousStep, { allowErrorPageRecovery: false });
   await executeStep(currentStep, { allowErrorPageRecovery: false });
   return true;
+}
+
+async function triggerSignupErrorPageRetry(step, pageState = null, options = {}) {
+  const currentStep = Number(step);
+  const previousStep = options.previousStep === undefined
+    ? getRetryPreviousStep(currentStep)
+    : options.previousStep;
+  const resolvedPageState = pageState || await getSignupPageState();
+
+  if (!resolvedPageState.isErrorPage || !resolvedPageState.hasVisibleRetryButton) {
+    return { triggered: false, reason: 'not_retryable' };
+  }
+
+  if (/max_check_attempts/i.test(String(resolvedPageState.errorMessage || ''))) {
+    await addLog(`Step ${currentStep}: OpenAI error page indicates max_check_attempts. Marking step as failed without retry.`, 'error');
+    return { triggered: false, reason: 'max_check_attempts' };
+  }
+
+  const state = await getState();
+  const currentCounts = { ...(state.errorPageRetryCounts || {}) };
+  const retryCount = Number(currentCounts[String(currentStep)] || 0);
+  if (retryCount >= MAX_ERROR_PAGE_RETRIES_PER_STEP) {
+    await addLog(`Step ${currentStep}: OpenAI error page retry limit reached (${MAX_ERROR_PAGE_RETRIES_PER_STEP}/${MAX_ERROR_PAGE_RETRIES_PER_STEP}). Marking step as failed.`, 'error');
+    return { triggered: false, reason: 'retry_limit' };
+  }
+
+  currentCounts[String(currentStep)] = retryCount + 1;
+  await setState({ errorPageRetryCounts: currentCounts });
+  extendRunTimeoutForErrorRefresh();
+
+  const rollbackSuffix = previousStep ? ` and rolling back to step ${previousStep}` : '';
+  await addLog(
+    `Step ${currentStep}: Detected OpenAI error page (${resolvedPageState.errorMessage || 'unknown error'}). Clicking retry${rollbackSuffix}. Auto retry ${retryCount + 1}/${MAX_ERROR_PAGE_RETRIES_PER_STEP}.`,
+    'warn'
+  );
+  await sendToContentScript('signup-page', {
+    type: 'RETRY_ERROR_PAGE',
+    step: currentStep,
+    source: 'background',
+    reportStepError: false,
+    payload: {},
+  });
+
+  return { triggered: true, retryCount: retryCount + 1 };
 }
 
 async function getImmediateFailureReasonForSignupErrorPage(step) {
@@ -2034,12 +2056,30 @@ function mapHotmailApiResultToError(result) {
 }
 
 async function callHotmailApi(path, body = null, options = {}) {
-  const { timeoutMs = 15000, method = body ? 'POST' : 'GET' } = options;
+  const {
+    timeoutMs = 15000,
+    method = body ? 'POST' : 'GET',
+    signal: externalSignal = null,
+    abortMessage = 'Hotmail API request aborted.',
+  } = options;
   const state = await getState();
   const baseUrl = getHotmailApiBaseUrl(state);
   const url = buildHotmailApiUrl(baseUrl, path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(externalSignal?.reason || abortMessage);
+    }
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
 
   try {
     const response = await fetch(url, {
@@ -2067,11 +2107,17 @@ async function callHotmailApi(path, body = null, options = {}) {
     return payload || {};
   } catch (err) {
     if (err?.name === 'AbortError') {
+      if (externalSignal?.aborted) {
+        throw new Error(abortMessage);
+      }
       throw new Error(`Hotmail API request timed out after ${Math.round(timeoutMs / 1000)}s: ${url}`);
     }
     throw new Error(`Hotmail API request failed: ${err.message}`);
   } finally {
     clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
@@ -2166,6 +2212,8 @@ async function pollCodeFromHotmail(step, state, options = {}) {
   const result = await callHotmailApi('/fetch-code-direct', payload, {
     timeoutMs: (payload.max_wait_seconds + 30) * 1000,
     method: 'POST',
+    signal: options.signal,
+    abortMessage: options.abortMessage || 'Hotmail polling aborted.',
   });
 
   if (result?.status !== 'ok' || !result?.code) {
@@ -2177,6 +2225,50 @@ async function pollCodeFromHotmail(step, state, options = {}) {
     code: result.code,
     emailTimestamp: result.received_at_ms || Date.now(),
   };
+}
+
+async function pollHotmailStep7WithActiveErrorRecovery(state, options = {}) {
+  const controller = new AbortController();
+  let watcherStopped = false;
+  let watcherTriggered = false;
+
+  const watcher = (async () => {
+    while (!watcherStopped) {
+      throwIfStopped();
+
+      const pageState = await getSignupPageState().catch(() => null);
+      if (pageState?.isErrorPage && pageState?.hasVisibleRetryButton) {
+        const retryResult = await triggerSignupErrorPageRetry(7, pageState, { previousStep: null });
+        if (retryResult.triggered) {
+          watcherTriggered = true;
+          controller.abort(STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE);
+          return;
+        }
+        if (retryResult.reason === 'max_check_attempts' || retryResult.reason === 'retry_limit') {
+          return;
+        }
+      }
+
+      await sleepWithStop(500);
+    }
+  })();
+
+  try {
+    return await pollCodeFromHotmail(7, state, {
+      ...options,
+      signal: controller.signal,
+      abortMessage: STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE,
+    });
+  } catch (err) {
+    if (watcherTriggered && err?.message === STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE) {
+      throw err;
+    }
+    throw err;
+  } finally {
+    watcherStopped = true;
+    controller.abort('done');
+    await Promise.allSettled([watcher]);
+  }
 }
 
 async function fetch2925MainEmailFromPage(options = {}) {
@@ -3201,13 +3293,24 @@ async function executeStep7(state) {
 
     while (!result) {
       try {
-        result = await pollCodeFromHotmail(7, state, {
+        result = await pollHotmailStep7WithActiveErrorRecovery(state, {
           filterAfterTimestamp,
           maxWaitSeconds: 90,
           pollIntervalSeconds: 5,
           excludeCodes,
         });
       } catch (err) {
+        if (err?.message === STEP7_ERROR_PAGE_RECOVERY_ABORT_MESSAGE) {
+          await addLog('Step 7: OpenAI timeout page detected during Hotmail polling. Retry clicked immediately; restarting polling...', 'warn');
+          await sleepWithStop(1500);
+          if (await waitForConsentPageReady(5000, 300)) {
+            await addLog('Step 7 skipped after error-page retry: consent page became ready without a login verification code', 'info');
+            await skipStepBecauseConsentReady(7);
+            return;
+          }
+          continue;
+        }
+
         if (await waitForConsentPageReady(5000, 300)) {
           await addLog('Step 7 skipped after retry wait: consent page became ready without a login verification code', 'info');
           await skipStepBecauseConsentReady(7);
