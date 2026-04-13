@@ -89,6 +89,8 @@ function getCurrentPageState() {
     isErrorPage: Boolean(errorPage),
     errorMessage: errorPage?.message || '',
     isPhoneRequiredPage: Boolean(phoneRequiredPage),
+    isVerificationPage: Boolean(detectVerificationCodePage()),
+    isProfileSetupPage: Boolean(detectProfileSetupPage()),
     isConsentPage: MultiPageOAuthFlow.isConsentPageState({
       url: location.href,
       hasVisibleContinueButton,
@@ -276,6 +278,59 @@ function detectPhoneRequiredPage() {
   });
 
   return Boolean(phoneInput || continueButton);
+}
+
+function detectVerificationCodePage() {
+  const codeInput = Array.from(document.querySelectorAll('input')).find((input) => {
+    if (!isElementVisible(input)) return false;
+    const text = normalizeVisibleText([
+      input.type,
+      input.name,
+      input.id,
+      input.placeholder,
+      input.getAttribute('aria-label'),
+      input.getAttribute('inputmode'),
+      input.maxLength,
+    ].filter(Boolean).join(' '));
+    return /otp|code|验证码|verification/i.test(text)
+      || (String(input.getAttribute('inputmode') || '').toLowerCase() === 'numeric' && Number(input.maxLength) === 6);
+  });
+
+  if (codeInput) {
+    return true;
+  }
+
+  const singleInputs = Array.from(document.querySelectorAll('input[maxlength="1"]')).filter((input) => isElementVisible(input));
+  if (singleInputs.length >= 6) {
+    return true;
+  }
+
+  const resendButton = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]')).find((button) => {
+    if (!isElementVisible(button)) return false;
+    const text = normalizeVisibleText(button.innerText || button.value || button.getAttribute('aria-label'));
+    return isResendVerificationButtonLabel(text) || /resend|重新发送|再次发送/i.test(text);
+  });
+
+  return Boolean(resendButton);
+}
+
+function detectProfileSetupPage() {
+  const nameInput = document.querySelector('input[name="name"], input[placeholder*="全名"], input[autocomplete="name"]');
+  if (!isElementVisible(nameInput)) {
+    return false;
+  }
+
+  const ageInput = document.querySelector('input[name="age"]');
+  const hiddenBirthday = document.querySelector('input[name="birthday"]');
+  const yearSpinner = document.querySelector('[role="spinbutton"][data-type="year"]');
+  const monthSpinner = document.querySelector('[role="spinbutton"][data-type="month"]');
+  const daySpinner = document.querySelector('[role="spinbutton"][data-type="day"]');
+
+  return Boolean(
+    (ageInput && isElementVisible(ageInput))
+    || hiddenBirthday
+    || (yearSpinner && monthSpinner && daySpinner)
+  );
 }
 
 async function resendVerificationCode(step) {

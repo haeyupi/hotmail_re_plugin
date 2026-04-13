@@ -1089,12 +1089,12 @@ async function completeStepFromBackground(step, payload = {}, options = {}) {
 async function getSignupPageState() {
   const tabId = await getTabId('signup-page');
   if (!tabId) {
-    return { url: '', hasVisibleContinueButton: false, hasVisibleRetryButton: false, isConsentPage: false, isErrorPage: false, isPhoneRequiredPage: false, errorMessage: '' };
+    return { url: '', hasVisibleContinueButton: false, hasVisibleRetryButton: false, isConsentPage: false, isErrorPage: false, isPhoneRequiredPage: false, isVerificationPage: false, isProfileSetupPage: false, errorMessage: '' };
   }
 
   const alive = await isTabAlive('signup-page');
   if (!alive) {
-    return { url: '', hasVisibleContinueButton: false, hasVisibleRetryButton: false, isConsentPage: false, isErrorPage: false, isPhoneRequiredPage: false, errorMessage: '' };
+    return { url: '', hasVisibleContinueButton: false, hasVisibleRetryButton: false, isConsentPage: false, isErrorPage: false, isPhoneRequiredPage: false, isVerificationPage: false, isProfileSetupPage: false, errorMessage: '' };
   }
 
   const tab = await chrome.tabs.get(tabId);
@@ -1117,6 +1117,8 @@ async function getSignupPageState() {
       isConsentPage: Boolean(pageState?.isConsentPage),
       isErrorPage: Boolean(pageState?.isErrorPage),
       isPhoneRequiredPage: Boolean(pageState?.isPhoneRequiredPage),
+      isVerificationPage: Boolean(pageState?.isVerificationPage),
+      isProfileSetupPage: Boolean(pageState?.isProfileSetupPage),
       errorMessage: String(pageState?.errorMessage || ''),
     };
   } catch (err) {
@@ -1128,6 +1130,8 @@ async function getSignupPageState() {
       hasVisibleRetryButton: false,
       isErrorPage: false,
       isPhoneRequiredPage: false,
+      isVerificationPage: false,
+      isProfileSetupPage: false,
       errorMessage: '',
     };
   }
@@ -1156,6 +1160,87 @@ async function waitForConsentPageReady(timeoutMs = 12000, pollMs = 300) {
   }
 
   return false;
+}
+
+function resolveStepAfterStep3FromPageState(pageState = {}) {
+  if (!pageState || typeof pageState !== 'object') {
+    return 0;
+  }
+
+  if (pageState.isConsentPage) {
+    return 8;
+  }
+
+  const url = String(pageState.url || '');
+  try {
+    const parsed = new URL(url);
+    const path = String(parsed.pathname || '').toLowerCase();
+    const search = String(parsed.search || '').toLowerCase();
+    const combined = `${path}${search}`;
+
+    if (path.includes('/sign-in-with-chatgpt/')) {
+      return 8;
+    }
+
+    if (
+      /\/onboarding(?:\/|$)/.test(path)
+      || /\/profile(?:\/|$)/.test(path)
+      || /\/welcome(?:\/|$)/.test(path)
+      || /signup\/details/.test(combined)
+      || /account\/details/.test(combined)
+      || /user\/details/.test(combined)
+      || /birthday/.test(combined)
+      || /(?:^|[/?=&_-])age(?:[/?=&_-]|$)/.test(combined)
+    ) {
+      return 5;
+    }
+
+    if (
+      /\/verify(?:\/|$)/.test(path)
+      || /\/verification(?:\/|$)/.test(path)
+      || /verify-email/.test(combined)
+      || /email-verification/.test(combined)
+      || /\/otp(?:\/|$)/.test(path)
+      || /(?:^|[/?=&_-])code(?:[/?=&_-]|$)/.test(combined)
+      || /confirm-email/.test(combined)
+    ) {
+      return 4;
+    }
+  } catch {}
+
+  if (pageState.isProfileSetupPage) {
+    return 5;
+  }
+
+  if (pageState.isVerificationPage) {
+    return 4;
+  }
+
+  return 0;
+}
+
+async function waitForResolvedStepAfterStep3(timeoutMs = 8000, pollMs = 300) {
+  const start = Date.now();
+  let latestPageState = null;
+
+  while (Date.now() - start < timeoutMs) {
+    throwIfStopped();
+    latestPageState = await getSignupPageState();
+    const resolvedStep = resolveStepAfterStep3FromPageState(latestPageState);
+    if (resolvedStep) {
+      return { resolvedStep, pageState: latestPageState };
+    }
+    await sleepWithStop(pollMs);
+  }
+
+  if (!latestPageState) {
+    latestPageState = await getSignupPageState().catch(() => null);
+  }
+
+  return {
+    resolvedStep: resolveStepAfterStep3FromPageState(latestPageState) || 4,
+    pageState: latestPageState || {},
+  };
 }
 
 async function confirmNoPhoneRequirementAfterStep7(timeoutMs = 5000, pollMs = 300) {
@@ -2415,8 +2500,37 @@ async function autoRunLoop(totalRuns) {
       }
 
       await executeStepAndWait(3, 3000);
-      await executeStepAndWait(4, 2000);
-      if (await waitForConsentPageReady(8000, 300)) {
+      const postStep3Resolution = await waitForResolvedStepAfterStep3(8000, 300);
+      const postStep3DirectConsent = postStep3Resolution.resolvedStep === 8;
+      await addLog(
+        `Step 3 post-submit resolved next step ${postStep3Resolution.resolvedStep} from URL: ${postStep3Resolution.pageState?.url || 'unknown'}`,
+        'info'
+      );
+
+      if (postStep3DirectConsent) {
+        await addLog('Consent page detected directly after step 3; skipping steps 4, 5, 6 and 7', 'info');
+        await skipStepBecauseConsentReady(4);
+        await skipStepBecauseConsentReady(5);
+        await skipStepBecauseConsentReady(6);
+        await skipStepBecauseConsentReady(7);
+      } else {
+        if (postStep3Resolution.resolvedStep === 5) {
+          await completeStepFromBackground(4, {
+            skipped: true,
+            reason: 'post_step3_resolved_to_step5',
+            resolvedStep: 5,
+            resolvedUrl: postStep3Resolution.pageState?.url || '',
+          }, {
+            logMessage: `Step 4 skipped: step 3 jumped directly to step 5 (${postStep3Resolution.pageState?.url || 'unknown url'})`,
+          });
+        } else {
+          await executeStepAndWait(4, 2000);
+        }
+      }
+
+      if (postStep3DirectConsent) {
+        await addLog('Consent page already confirmed after step 3; continuing from step 8', 'info');
+      } else if (await waitForConsentPageReady(8000, 300)) {
         await addLog('Consent page detected after step 4; skipping steps 5, 6 and 7', 'info');
         await skipStepBecauseConsentReady(5);
         await skipStepBecauseConsentReady(6);
@@ -2813,6 +2927,31 @@ function shouldRetryHotmailStep7WithResend(errorMessage, resendCount, maxResends
 }
 
 async function executeStep4(state) {
+  const postStep3Resolution = await waitForResolvedStepAfterStep3(3500, 250);
+  if (postStep3Resolution.resolvedStep === 5) {
+    await completeStepFromBackground(4, {
+      skipped: true,
+      reason: 'post_step3_resolved_to_step5',
+      resolvedStep: 5,
+      resolvedUrl: postStep3Resolution.pageState?.url || '',
+    }, {
+      logMessage: `Step 4 skipped: URL after step 3 resolved directly to step 5 (${postStep3Resolution.pageState?.url || 'unknown url'})`,
+    });
+    return;
+  }
+
+  if (postStep3Resolution.resolvedStep === 8) {
+    await completeStepFromBackground(4, {
+      skipped: true,
+      reason: 'post_step3_resolved_to_step8',
+      resolvedStep: 8,
+      resolvedUrl: postStep3Resolution.pageState?.url || '',
+    }, {
+      logMessage: `Step 4 skipped: URL after step 3 resolved directly to consent (${postStep3Resolution.pageState?.url || 'unknown url'})`,
+    });
+    return;
+  }
+
   let result = null;
   const emailProvider = normalizeEmailProvider(state.emailProvider);
 
