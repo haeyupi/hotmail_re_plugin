@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微软邮箱变体处理器</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            background: #fff;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 900px;
+        }
+        h2 {
+            margin-top: 0;
+            color: #1a73e8;
+            font-size: 22px;
+        }
+        p {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 15px;
+        }
+        textarea {
+            width: 100%;
+            height: 200px;
+            padding: 12px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: vertical;
+            box-sizing: border-box;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow-x: auto;
+        }
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #1a73e8;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1557b0;
+        }
+        .btn-secondary {
+            background: #34a853;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #2b803f;
+        }
+        .preview-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 13px;
+            color: #555;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>微软邮箱变体处理器</h2>
+    <p>将原始数据粘贴在下方（格式：邮箱----密码----UUID----Token）。工具会在邮箱名后（@符号前）加上6位随机字符，并保留后续所有信息。</p>
+    
+    <textarea id="inputData" placeholder="例如：TaylorOliver3500@hotmail.com----tfkyxa...----UUID...----Token..."></textarea>
+    
+    <div class="controls">
+        <button class="btn-primary" onclick="processData(false)">导出TXT (不含原邮箱数据)</button>
+        <button class="btn-secondary" onclick="processData(true)">导出TXT (包含原邮箱数据)</button>
+    </div>
+
+    <h3>处理预览 (仅显示前 15 行)：</h3>
+    <div id="preview" class="preview-box">点击上方按钮生成预览并下载...</div>
+    <div id="stats" class="stats"></div>
+</div>
+
+<script>
+    // 生成随机 6 位字母和数字
+    function generateRandomString(length) {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        let result = '';
+        for (let i = 0; i < length; i++) {
+            result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+    }
+
+    function processData(includeOriginal) {
+        const input = document.getElementById('inputData').value;
+        if (!input.trim()) {
+            alert('请先输入数据！');
+            return;
+        }
+        
+        const lines = input.split('\n');
+        let results = [];
+        let validLineCount = 0;
+        let parsedLines = [];
+
+        // 第一步：解析并暂存所有有效数据
+        lines.forEach(line => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) return; // 跳过空行
+            
+            // 找到第一个 '----' 的位置
+            const separatorIndex = trimmedLine.indexOf('----');
+            if (separatorIndex === -1) return; // 如果格式不对，跳过
+            
+            validLineCount++;
+            
+            // 拆分邮箱和后续的尾巴信息
+            const originalEmail = trimmedLine.substring(0, separatorIndex);
+            const tailData = trimmedLine.substring(separatorIndex); // 这里包含了 '----密码----UUID----Token'
+            
+            // 拆分邮箱名和域名
+            let username = originalEmail;
+            let domain = "";
+            if (originalEmail.includes('@')) {
+                const parts = originalEmail.split('@');
+                username = parts[0];
+                domain = '@' + parts[1];
+            }
+
+            parsedLines.push({
+                originalLine: trimmedLine,
+                username: username,
+                domain: domain,
+                tailData: tailData
+            });
+        });
+
+        if (parsedLines.length === 0) {
+            alert('没有找到有效格式的数据，请检查输入！');
+            return;
+        }
+
+        // 第二步：如果选择了包含原邮箱，先将所有原封不动的原始行集中排在最前面（作为第0轮）
+        if (includeOriginal) {
+            parsedLines.forEach(item => {
+                results.push(item.originalLine);
+            });
+        }
+
+        // 第三步：交叉生成 5 遍变体（外层循环5次，内层循环所有邮箱，实现一个一个来）
+        for (let i = 0; i < 5; i++) {
+            parsedLines.forEach(item => {
+                const randomSuffix = generateRandomString(6);
+                // 拼接新邮箱：原邮箱名 + "+" + 随机字符 + @域名
+                const newEmail = item.username + "+" + randomSuffix + item.domain;
+                // 拼接最终行：新邮箱 + 原封不动的尾巴数据
+                const newLine = newEmail + item.tailData;
+                
+                results.push(newLine);
+            });
+        }
+
+        // 更新预览和统计
+        document.getElementById('preview').innerText = results.slice(0, 15).join('\n') + (results.length > 15 ? '\n\n... (更多内容已省略)' : '');
+        document.getElementById('stats').innerText = `已处理 ${validLineCount} 个账号，共生成 ${results.length} 行数据。`;
+
+        // 触发下载
+        downloadTxt(results.join('\n'), includeOriginal);
+    }
+
+    function downloadTxt(content, includeOriginal) {
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const fileName = includeOriginal ? "邮箱数据_含原信息.txt" : "邮箱数据_仅变体.txt";
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+</script>
+
+</body>
+</html>
