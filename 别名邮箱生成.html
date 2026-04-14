@@ -51,6 +51,30 @@
             display: flex;
             gap: 15px;
             flex-wrap: wrap;
+            align-items: center;
+        }
+        .variant-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            width: 100%;
+        }
+        .variant-controls label {
+            font-size: 14px;
+            color: #444;
+            font-weight: 600;
+        }
+        .variant-controls input {
+            width: 90px;
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .variant-tip {
+            font-size: 13px;
+            color: #666;
         }
         button {
             padding: 10px 20px;
@@ -104,6 +128,11 @@
     <textarea id="inputData" placeholder="例如：TaylorOliver3500@hotmail.com----tfkyxa...----UUID...----Token..."></textarea>
     
     <div class="controls">
+        <div class="variant-controls">
+            <label for="variantCount">生成变体个数</label>
+            <input type="number" id="variantCount" min="1" max="100" value="4">
+            <span class="variant-tip">据说加原邮箱能注册共5个</span>
+        </div>
         <button class="btn-primary" onclick="processData(false)">导出TXT (不含原邮箱数据)</button>
         <button class="btn-secondary" onclick="processData(true)">导出TXT (包含原邮箱数据)</button>
     </div>
@@ -126,6 +155,9 @@
 
     function processData(includeOriginal) {
         const input = document.getElementById('inputData').value;
+        const variantCountInput = document.getElementById('variantCount');
+        const variantCount = Math.max(1, parseInt(variantCountInput.value, 10) || 4);
+        variantCountInput.value = variantCount;
         if (!input.trim()) {
             alert('请先输入数据！');
             return;
@@ -180,8 +212,8 @@
             });
         }
 
-        // 第三步：交叉生成 5 遍变体（外层循环5次，内层循环所有邮箱，实现一个一个来）
-        for (let i = 0; i < 5; i++) {
+        // 第三步：按配置的次数交叉生成变体
+        for (let i = 0; i < variantCount; i++) {
             parsedLines.forEach(item => {
                 const randomSuffix = generateRandomString(6);
                 // 拼接新邮箱：原邮箱名 + "+" + 随机字符 + @域名
