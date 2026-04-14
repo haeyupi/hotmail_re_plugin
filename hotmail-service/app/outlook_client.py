@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,7 +18,7 @@ from .accounts import Account
 from .code_extractor import extract_code, make_preview, normalize_text
 from .config import Settings
 from .models import FetchResult
-from .oauth_mail_client import can_use_oauth, fetch_code_via_oauth, normalize_access_method
+from .oauth_mail_client import can_use_oauth, fetch_code_via_oauth, list_messages_via_oauth, normalize_access_method
 from .session_cache import SessionStateCache
 
 LOGGER = logging.getLogger(__name__)
@@ -187,6 +188,12 @@ SECURITY_CHALLENGE_PATTERNS = (
     "protect your account",
     "use your phone",
     "security info",
+    "your account has been locked",
+    "account has been locked",
+    "let's prove you're human",
+    "show you're human",
+    "press and hold the button",
+    "microsoft services agreement",
 )
 
 LOGIN_FAILED_PATTERNS = (
@@ -217,6 +224,19 @@ class ListMessageSnapshot:
     sender: str | None
     received_at: str | None
     preview: str | None
+    conversation_id: str | None
+
+
+@dataclass(slots=True)
+class MailboxMessage:
+    folder: str
+    subject: str | None
+    sender: str | None
+    received_at: str | None
+    received_at_ms: int | None
+    preview: str | None
+    body: str | None
+    source: str
 
 
 class OutlookWebFetcher:
@@ -231,6 +251,44 @@ class OutlookWebFetcher:
         existed = path.exists()
         self.session_cache.invalidate(account)
         return existed, path
+
+    def _should_fallback_to_playwright(self, account: Account, access_method: str) -> bool:
+        return access_method in {"auto", "graph"} and bool(account.password)
+
+    def list_messages(self, account: Account, limit: int = 50) -> tuple[str, list[MailboxMessage]]:
+        normalized_limit = max(1, min(limit, 200))
+        access_method = normalize_access_method(account.access_method)
+        should_fallback_to_playwright = self._should_fallback_to_playwright(account, access_method)
+
+        if access_method != "playwright" and can_use_oauth(account):
+            try:
+                resolved_method, messages = list_messages_via_oauth(account)
+                if should_fallback_to_playwright and not messages:
+                    raise RuntimeError(f"{resolved_method} returned no mailbox messages.")
+                return (
+                    resolved_method,
+                    [
+                        MailboxMessage(
+                            folder=message.folder,
+                            subject=message.subject,
+                            sender=message.sender,
+                            received_at=message.received_at,
+                            received_at_ms=message.received_at_ms,
+                            preview=message.preview,
+                            body=message.body,
+                            source=resolved_method,
+                        )
+                        for message in messages[:normalized_limit]
+                    ],
+                )
+            except Exception:
+                if not should_fallback_to_playwright:
+                    raise
+
+        if not account.password:
+            raise RuntimeError("Password login is unavailable for this account.")
+
+        return self._list_messages_via_playwright(account, normalized_limit)
 
     def _create_diagnostics(
         self,
@@ -311,6 +369,7 @@ class OutlookWebFetcher:
         diagnostics = self._create_diagnostics(account, request_context, min_created_at_ms, excluded_codes)
 
         access_method = normalize_access_method(account.access_method)
+        should_fallback_to_playwright = self._should_fallback_to_playwright(account, access_method)
         if access_method != "playwright" and can_use_oauth(account):
             oauth_result = fetch_code_via_oauth(
                 account,
@@ -321,7 +380,7 @@ class OutlookWebFetcher:
             )
             if oauth_result.status == "ok":
                 return oauth_result
-            if access_method != "auto" or not account.password:
+            if not should_fallback_to_playwright:
                 diagnostics["result"] = oauth_result.to_dict()
                 self._log_failure_diagnostics(diagnostics)
                 return oauth_result
@@ -441,12 +500,73 @@ class OutlookWebFetcher:
                 return result
             return FetchResult(status="mailbox_load_failed", reason=f"Unexpected error: {exc}")
 
+    def _list_messages_via_playwright(self, account: Account, limit: int) -> tuple[str, list[MailboxMessage]]:
+        context: BrowserContext | None = None
+        page: Page | None = None
+        messages: list[MailboxMessage] = []
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=self.settings.headless)
+            try:
+                storage_state_path = self.session_cache.fresh_path_for(account)
+                context_kwargs = {"storage_state": str(storage_state_path)} if storage_state_path is not None else {}
+                context = browser.new_context(**context_kwargs)
+                context.set_default_timeout(self.settings.action_timeout_ms)
+                context.set_default_navigation_timeout(self.settings.navigation_timeout_ms)
+                page = context.new_page()
+
+                if storage_state_path is not None and self._resume_cached_session(page):
+                    login_result = None
+                else:
+                    login_result = self._login(page, account)
+                if login_result is not None and storage_state_path is not None:
+                    self.session_cache.invalidate(account)
+                    context.close()
+                    context = browser.new_context()
+                    context.set_default_timeout(self.settings.action_timeout_ms)
+                    context.set_default_navigation_timeout(self.settings.navigation_timeout_ms)
+                    page = context.new_page()
+                    login_result = self._login(page, account)
+                if login_result is not None:
+                    self.session_cache.invalidate(account)
+                    raise RuntimeError(login_result.reason or "Unable to open Outlook mailbox.")
+
+                self.session_cache.save(context, account)
+                per_folder_limit = max(1, min(limit, 100))
+                for folder_name in ("Inbox", "Junk Email"):
+                    if not self._open_folder(page, folder_name):
+                        continue
+                    messages.extend(self._collect_folder_messages(page, folder_name, per_folder_limit))
+
+                messages.sort(key=lambda item: (item.received_at_ms or 0, 1 if item.folder == "Inbox" else 0), reverse=True)
+                return "playwright", messages[:limit]
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                browser.close()
+
     def _login(self, page: Page, account: Account) -> FetchResult | None:
         page.goto(self.settings.outlook_url, wait_until="domcontentloaded")
         if self._is_mailbox_ready(page):
             return None
+        if self._detect_security_challenge(page):
+            return FetchResult(
+                status="security_challenge",
+                reason="Microsoft locked the account or requested human verification before sign-in.",
+            )
         if not self._has_login_form(page):
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            self._wait_a_moment(page)
+            if self._detect_security_challenge(page):
+                return FetchResult(
+                    status="security_challenge",
+                    reason="Microsoft locked the account or requested human verification before sign-in.",
+                )
+            if not self._has_login_form(page):
+                return FetchResult(status="login_failed", reason="Could not find the Microsoft sign-in form.")
 
         self._fill_first(page, ('input[name="loginfmt"]', 'input[type="email"]', 'input[name="username"]'), account.email)
         if not self._click_first(page, ('#idSIButton9', 'input[type="submit"]', 'button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")')):
@@ -485,7 +605,7 @@ class OutlookWebFetcher:
 
     def _resume_cached_session(self, page: Page) -> bool:
         page.goto(self.settings.outlook_url, wait_until="domcontentloaded")
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + 4
         while time.monotonic() <= deadline:
             self._dismiss_post_login_prompts(page)
             if self._is_mailbox_ready(page):
@@ -510,6 +630,9 @@ class OutlookWebFetcher:
                 return
 
     def _is_mailbox_ready(self, page: Page) -> bool:
+        parsed_url = urlparse(page.url or "")
+        if parsed_url.netloc.lower() != "outlook.live.com" or not parsed_url.path.startswith("/mail"):
+            return False
         for selector in MAILBOX_READY_SELECTORS:
             locator = page.locator(selector).first
             try:
@@ -517,6 +640,11 @@ class OutlookWebFetcher:
                     return True
             except Error:
                 continue
+        try:
+            if self._message_row_locators(page, limit=1):
+                return True
+        except Error:
+            pass
         body_text = normalize_text(page.locator("body").inner_text())
         mailbox_markers = (
             "Inbox",
@@ -575,6 +703,11 @@ class OutlookWebFetcher:
 
     def _wait_for_message_list(self, page: Page) -> None:
         self._find_visible_locator(page, ('[aria-label*="Message list"]', 'div[role="grid"]', 'div[role="treegrid"]'))
+        deadline = time.monotonic() + 3
+        while time.monotonic() <= deadline:
+            if self._message_row_locators(page, limit=1):
+                return
+            page.wait_for_timeout(200)
 
     def _scan_folder_for_code(
         self,
@@ -668,6 +801,26 @@ class OutlookWebFetcher:
 
         return None
 
+    def _collect_folder_messages(self, page: Page, folder_name: str, limit: int) -> list[MailboxMessage]:
+        collected: list[MailboxMessage] = []
+        for row in self._message_row_locators(page, limit=limit):
+            snapshot = self._snapshot_from_message_row(row, folder_name)
+            if snapshot is None:
+                continue
+            collected.append(
+                MailboxMessage(
+                    folder=snapshot.folder,
+                    subject=snapshot.subject,
+                    sender=snapshot.sender,
+                    received_at=snapshot.received_at,
+                    received_at_ms=self._parse_received_at_ms(snapshot.received_at),
+                    preview=snapshot.preview,
+                    body=None,
+                    source="playwright",
+                )
+            )
+        return collected
+
     def _message_row_locators(self, page: Page, limit: int):
         selectors = (
             '[aria-label*="Message list"] div[role="option"]',
@@ -686,7 +839,7 @@ class OutlookWebFetcher:
             for index in range(count):
                 candidate = locator.nth(index)
                 try:
-                    if candidate.is_visible() and normalize_text(candidate.inner_text()):
+                    if candidate.is_visible() and normalize_text(candidate.text_content() or ""):
                         rows.append(candidate)
                         if len(rows) >= limit:
                             return rows
@@ -696,19 +849,57 @@ class OutlookWebFetcher:
 
     def _snapshot_from_message_row(self, row, folder_name: str) -> ListMessageSnapshot | None:
         try:
-            summary = normalize_text(" ".join(filter(None, [row.get_attribute("aria-label"), row.inner_text()])))
+            aria_summary = normalize_text(row.get_attribute("aria-label"))
+            row_text = normalize_text(row.text_content() or "")
+            summary = normalize_text(" ".join(filter(None, [aria_summary, row_text])))
         except Error:
             return None
         if not summary:
             return None
-        sender = self._extract_sender_from_text(summary)
+        raw_lines = [normalize_text(line) for line in row_text.splitlines()] if row_text else []
+        visible_lines = [line for line in raw_lines if line]
+        if visible_lines and len(visible_lines[0]) <= 2 and "@" not in visible_lines[0] and not re.search(r"\d", visible_lines[0]):
+            visible_lines = visible_lines[1:]
+
+        received_at = None
+        received_index = -1
+        for index, line in enumerate(visible_lines):
+            if self._extract_received_at_from_summary(line):
+                received_at = self._extract_received_at_from_summary(line)
+                received_index = index
+                break
+
+        sender = self._extract_sender_from_text(aria_summary or summary)
+        if sender is None and visible_lines:
+            sender = visible_lines[0]
+
+        subject = None
+        if received_index > 0:
+            subject = visible_lines[received_index - 1]
+            if sender and subject == sender and received_index > 1:
+                subject = visible_lines[received_index - 2]
+        elif len(visible_lines) >= 2:
+            subject = visible_lines[1] if visible_lines[0] == sender else visible_lines[0]
+
+        preview_lines: list[str] = []
+        if received_index >= 0 and received_index + 1 < len(visible_lines):
+            preview_lines = visible_lines[received_index + 1 :]
+        elif subject and visible_lines:
+            try:
+                subject_index = visible_lines.index(subject)
+            except ValueError:
+                subject_index = -1
+            if subject_index >= 0 and subject_index + 1 < len(visible_lines):
+                preview_lines = visible_lines[subject_index + 1 :]
+
         return ListMessageSnapshot(
             folder=folder_name,
             summary_text=summary,
-            subject=self._extract_subject_from_summary(summary, sender),
+            subject=subject or self._extract_subject_from_summary(summary, sender),
             sender=sender,
-            received_at=self._extract_received_at_from_summary(summary),
-            preview=make_preview(summary),
+            received_at=received_at or self._extract_received_at_from_summary(summary),
+            preview=make_preview(" ".join(preview_lines) if preview_lines else summary),
+            conversation_id=row.get_attribute("data-convid"),
         )
 
     def _read_opened_message(self, page: Page, row, folder_name: str) -> MessageSnapshot | None:
@@ -729,8 +920,9 @@ class OutlookWebFetcher:
 
     def _extract_message_text(self, page: Page) -> str:
         for selector in (
-            '[data-app-section="MailReadCompose"]',
             '[role="document"]',
+            '[data-app-section="MailReadCompose"] [role="document"]',
+            '[data-app-section="MailReadCompose"]',
             '[aria-label*="Reading pane"]',
             '[aria-label*="Message body"]',
             '[aria-label*="阅读窗格"]',
@@ -747,15 +939,20 @@ class OutlookWebFetcher:
 
     def _extract_subject(self, page: Page) -> str | None:
         for selector in (
-            '[role="heading"][aria-level="1"]',
-            '[role="heading"][aria-level="2"]',
+            '[data-app-section="MailReadCompose"] [id*="_SUBJECT"] [title]',
+            '[data-app-section="MailReadCompose"] [id*="_SUBJECT"]',
+            '[data-app-section="MailReadCompose"] [role="heading"][aria-level="3"]',
+            '[aria-label*="阅读窗格"] [id*="_SUBJECT"] [title]',
+            '[aria-label*="阅读窗格"] [role="heading"][aria-level="3"]',
+            '[role="main"] [id*="_SUBJECT"] [title]',
+            '[role="main"] [id*="_SUBJECT"]',
             'h1',
             'h2',
         ):
             locator = page.locator(selector).first
             try:
                 if locator.count() and locator.is_visible():
-                    text = normalize_text(locator.inner_text())
+                    text = normalize_text(locator.get_attribute("title") or locator.inner_text())
                     if text:
                         return text
             except Error:
@@ -763,6 +960,21 @@ class OutlookWebFetcher:
         return None
 
     def _extract_sender(self, page: Page) -> str | None:
+        for selector in (
+            '[data-app-section="MailReadCompose"] [id*="_FROM"] .OZZZK',
+            '[data-app-section="MailReadCompose"] [id*="_FROM"]',
+            '[aria-label*="阅读窗格"] [id*="_FROM"] .OZZZK',
+            '[role="main"] [id*="_FROM"] .OZZZK',
+        ):
+            locator = page.locator(selector).first
+            try:
+                if locator.count() and locator.is_visible():
+                    text = normalize_text(locator.inner_text())
+                    sender = self._extract_sender_from_text(text)
+                    if sender:
+                        return sender
+            except Error:
+                continue
         text = normalize_text(page.locator("body").inner_text())
         return self._extract_sender_from_text(text)
 

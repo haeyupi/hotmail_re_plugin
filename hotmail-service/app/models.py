@@ -133,6 +133,7 @@ class HotmailAccountResponse(BaseModel):
     password: str
     client_id: str
     refresh_token: str
+    access_method: str = "auto"
     workflow_status: str
     tags: list[str] = Field(default_factory=list)
     openai_password: Optional[str] = None
@@ -186,6 +187,7 @@ class HotmailAccountUpdateRequest(BaseModel):
     tags: Optional[list[str]] = None
     note: Optional[str] = None
     openai_password: Optional[str] = None
+    access_method: Optional[str] = None
 
 
 class HotmailDeleteResponse(BaseModel):
@@ -220,6 +222,33 @@ class HotmailBatchActionResponse(BaseModel):
     claimed: int = 0
     success: int = 0
     failed: int = 0
+
+
+class HotmailMailboxMessageResponse(BaseModel):
+    folder: str
+    subject: Optional[str] = None
+    sender: Optional[str] = None
+    received_at: Optional[str] = None
+    received_at_ms: Optional[int] = None
+    preview: Optional[str] = None
+    body: Optional[str] = None
+    source: str = "unknown"
+
+
+class HotmailMailboxResponse(BaseModel):
+    status: str
+    email: str
+    access_method: str = "auto"
+    resolved_method: str = "unknown"
+    available_methods: list[str] = Field(default_factory=list)
+    supports_listing: bool = True
+    has_password: bool = False
+    has_oauth: bool = False
+    endpoint: str = "/messages-direct"
+    example_payload: dict = Field(default_factory=dict)
+    messages: list[HotmailMailboxMessageResponse] = Field(default_factory=list)
+    total_messages: int = 0
+    reason: Optional[str] = None
 
 
 @dataclass(slots=True)
