@@ -4,10 +4,11 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
-from app.accounts import load_accounts_csv
+from app.accounts import Account, load_accounts_csv
 from app.config import Settings
 from app.main import create_app
 from app.models import FetchResult
+from app.outlook_client import MailboxMessage
 from app.oauth_mail_client import extract_code_from_callback_url, get_oauth_authorize_url
 from app.outlook_client import FOLDER_ALIASES, OutlookWebFetcher
 
@@ -16,6 +17,8 @@ class DummyFetcher:
     def __init__(self) -> None:
         self.released_accounts: list[str] = []
         self.fetched_accounts: list[tuple[str, str]] = []
+        self.mailbox_accounts: list[str] = []
+        self.mailbox_methods: list[str] = []
 
     def fetch_code(
         self,
@@ -42,6 +45,82 @@ class DummyFetcher:
     def release_session(self, account) -> tuple[bool, Path]:
         self.released_accounts.append(account.id)
         return True, Path(f"/tmp/{account.id}.json")
+
+    def list_messages(self, account, limit: int = 50) -> tuple[str, list[MailboxMessage]]:
+        self.mailbox_accounts.append(account.email)
+        self.mailbox_methods.append(account.access_method)
+        return (
+            "graph",
+            [
+                MailboxMessage(
+                    folder="Inbox",
+                    subject=f"Mailbox subject for {account.email}",
+                    sender="noreply@example.com",
+                    received_at="2026-04-10T00:00:00Z",
+                    received_at_ms=1775779200000,
+                    preview="Preview body",
+                    body="Body content",
+                    source="graph",
+                )
+            ][:limit],
+        )
+
+
+class CountingMailboxFetcher(DummyFetcher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mailbox_calls = 0
+
+    def list_messages(self, account, limit: int = 50) -> tuple[str, list[MailboxMessage]]:
+        self.mailbox_calls += 1
+        self.mailbox_accounts.append(account.email)
+        self.mailbox_methods.append(account.access_method)
+        messages = [
+            MailboxMessage(
+                folder="Inbox",
+                subject=f"Mailbox subject {index} for {account.email}",
+                sender=f"sender{index}@example.com",
+                received_at=f"2026-04-10T00:00:0{index}Z",
+                received_at_ms=1775779200000 + index,
+                preview=f"Preview body {index}",
+                body=f"Body content {index}",
+                source="graph",
+            )
+            for index in range(3)
+        ]
+        return ("graph", messages[:limit])
+
+
+class FakeLocator:
+    def __init__(self, visible: bool = False, text: str = "", count: int = 1) -> None:
+        self._visible = visible
+        self._text = text
+        self._count = count
+
+    @property
+    def first(self):
+        return self
+
+    def count(self) -> int:
+        return self._count
+
+    def is_visible(self) -> bool:
+        return self._visible
+
+    def inner_text(self) -> str:
+        return self._text
+
+
+class FakePage:
+    def __init__(self, url: str, mapping: dict[str, FakeLocator], body_text: str) -> None:
+        self.url = url
+        self._mapping = mapping
+        self._body_text = body_text
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == "body":
+            return FakeLocator(visible=True, text=self._body_text)
+        return self._mapping.get(selector, FakeLocator(visible=False, text="", count=0))
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -184,6 +263,39 @@ def test_fetch_code_direct_accepts_graph_credentials_without_password(tmp_path: 
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_messages_direct_returns_graph_shaped_mailbox_payload(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    fetcher = DummyFetcher()
+    app = create_app(
+        settings=settings,
+        account_store=None,
+        fetcher=fetcher,
+        browser_checker=lambda: (True, None),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/messages-direct",
+        json={
+            "email": "graph@example.com",
+            "client_id": "client-id",
+            "refresh_token": "refresh-token",
+            "access_method": "graph",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["email"] == "graph@example.com"
+    assert payload["access_method"] == "graph"
+    assert payload["resolved_method"] == "graph"
+    assert payload["endpoint"] == "/messages-direct"
+    assert payload["messages"][0]["body"] == "Body content"
+    assert fetcher.mailbox_accounts == ["graph@example.com"]
+    assert fetcher.mailbox_methods == ["graph"]
 
 
 def test_release_session_accepts_direct_email(tmp_path: Path) -> None:
@@ -409,6 +521,68 @@ def test_hotmail_account_db_batch_update_delete_and_clear(tmp_path: Path) -> Non
     assert cleared.json()["total"] == 0
 
 
+def test_account_mailbox_endpoint_and_access_method_update(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    fetcher = DummyFetcher()
+    app = create_app(
+        settings=settings,
+        account_store=None,
+        fetcher=fetcher,
+        browser_checker=lambda: (True, None),
+    )
+    client = TestClient(app)
+    client.post(
+        "/accounts/import",
+        json={"raw_text": "a@hotmail.com----pass1----client1----refresh1"},
+    )
+
+    updated = client.put(
+        "/accounts/a@hotmail.com",
+        json={"access_method": "graph"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["account"]["access_method"] == "graph"
+
+    mailbox = client.get("/accounts/a@hotmail.com/messages")
+    assert mailbox.status_code == 200
+    payload = mailbox.json()
+    assert payload["email"] == "a@hotmail.com"
+    assert payload["access_method"] == "graph"
+    assert payload["resolved_method"] == "graph"
+    assert payload["endpoint"] == "/messages-direct"
+    assert payload["messages"][0]["subject"] == "Mailbox subject for a@hotmail.com"
+    assert fetcher.mailbox_accounts == ["a@hotmail.com"]
+
+
+def test_account_mailbox_endpoint_uses_short_cache_and_two_message_limit(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    fetcher = CountingMailboxFetcher()
+    app = create_app(
+        settings=settings,
+        account_store=None,
+        fetcher=fetcher,
+        browser_checker=lambda: (True, None),
+    )
+    client = TestClient(app)
+    client.post(
+        "/accounts/import",
+        json={"raw_text": "a@hotmail.com----pass1----client1----refresh1"},
+    )
+
+    first = client.get("/accounts/a@hotmail.com/messages")
+    second = client.get("/accounts/a@hotmail.com/messages")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_payload = first.json()
+    second_payload = second.json()
+    assert first_payload["total_messages"] == 2
+    assert len(first_payload["messages"]) == 2
+    assert first_payload["messages"][0]["subject"] == "Mailbox subject 0 for a@hotmail.com"
+    assert second_payload == first_payload
+    assert fetcher.mailbox_calls == 1
+
+
 def test_parse_received_time_supports_relative_labels(tmp_path: Path) -> None:
     fetcher = OutlookWebFetcher(make_settings(tmp_path))
 
@@ -420,6 +594,112 @@ def test_parse_received_time_supports_relative_labels(tmp_path: Path) -> None:
     assert fetcher._parse_received_at_ms("Hier 09:11") is not None
     assert fetcher._parse_received_at_ms("Heute 09:11") is not None
     assert fetcher._parse_received_at_ms("Oggi 09:11") is not None
+
+
+def test_mailbox_ready_requires_real_outlook_mail_url(tmp_path: Path) -> None:
+    fetcher = OutlookWebFetcher(make_settings(tmp_path))
+
+    marketing_page = FakePage(
+        "https://www.microsoft.com/zh-cn/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+        {},
+        "Outlook 收件箱 垃圾邮件",
+    )
+    assert fetcher._is_mailbox_ready(marketing_page) is False
+
+    mailbox_page = FakePage(
+        "https://outlook.live.com/mail/0/",
+        {'[data-app-section="MailReadCompose"]': FakeLocator(visible=True, text="阅读窗格")},
+        "Outlook 收件箱 垃圾邮件",
+    )
+    assert fetcher._is_mailbox_ready(mailbox_page) is True
+
+
+def test_detect_security_challenge_matches_locked_account_copy(tmp_path: Path) -> None:
+    fetcher = OutlookWebFetcher(make_settings(tmp_path))
+    locked_page = FakePage(
+        "https://account.live.com/Abuse",
+        {},
+        "Your account has been locked. Let's prove you're human. Press and hold the button.",
+    )
+    assert fetcher._detect_security_challenge(locked_page) is True
+
+
+def test_list_messages_auto_falls_back_to_playwright_when_oauth_is_empty(tmp_path: Path, monkeypatch) -> None:
+    fetcher = OutlookWebFetcher(make_settings(tmp_path))
+    account = Account(
+        id="acct",
+        email="acct@example.com",
+        password="secret",
+        client_id="client-id",
+        refresh_token="refresh-token",
+        access_method="auto",
+    )
+
+    monkeypatch.setattr("app.outlook_client.list_messages_via_oauth", lambda account: ("imap_new", []))
+
+    def fake_playwright(account, limit):
+        return (
+            "playwright",
+            [
+                MailboxMessage(
+                    folder="Inbox",
+                    subject="Playwright subject",
+                    sender="noreply@example.com",
+                    received_at="2026-04-10T00:00:00Z",
+                    received_at_ms=1775779200000,
+                    preview="Preview body",
+                    body="Body content",
+                    source="playwright",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(fetcher, "_list_messages_via_playwright", fake_playwright)
+
+    resolved_method, messages = fetcher.list_messages(account, limit=10)
+
+    assert resolved_method == "playwright"
+    assert len(messages) == 1
+    assert messages[0].source == "playwright"
+
+
+def test_list_messages_graph_falls_back_to_playwright_when_oauth_is_empty(tmp_path: Path, monkeypatch) -> None:
+    fetcher = OutlookWebFetcher(make_settings(tmp_path))
+    account = Account(
+        id="acct",
+        email="acct@example.com",
+        password="secret",
+        client_id="client-id",
+        refresh_token="refresh-token",
+        access_method="graph",
+    )
+
+    monkeypatch.setattr("app.outlook_client.list_messages_via_oauth", lambda account: ("graph", []))
+
+    def fake_playwright(account, limit):
+        return (
+            "playwright",
+            [
+                MailboxMessage(
+                    folder="Inbox",
+                    subject="Playwright subject",
+                    sender="noreply@example.com",
+                    received_at="2026-04-10T00:00:00Z",
+                    received_at_ms=1775779200000,
+                    preview="Preview body",
+                    body="Body content",
+                    source="playwright",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(fetcher, "_list_messages_via_playwright", fake_playwright)
+
+    resolved_method, messages = fetcher.list_messages(account, limit=10)
+
+    assert resolved_method == "playwright"
+    assert len(messages) == 1
+    assert messages[0].source == "playwright"
 
 
 def test_parse_received_time_supports_weekdays(tmp_path: Path) -> None:

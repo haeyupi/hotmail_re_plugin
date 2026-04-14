@@ -18,6 +18,7 @@ class StoredAccount:
     password: str
     client_id: str
     refresh_token: str
+    access_method: str
     workflow_status: str
     tags: list[str]
     openai_password: str | None
@@ -48,6 +49,7 @@ class HotmailAccountDb:
                     password TEXT NOT NULL,
                     client_id TEXT NOT NULL DEFAULT '',
                     refresh_token TEXT NOT NULL DEFAULT '',
+                    access_method TEXT NOT NULL DEFAULT 'auto',
                     workflow_status TEXT NOT NULL DEFAULT 'pending',
                     tags TEXT NOT NULL DEFAULT '[]',
                     openai_password TEXT,
@@ -58,6 +60,9 @@ class HotmailAccountDb:
                 )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(hotmail_accounts)").fetchall()}
+            if "access_method" not in columns:
+                conn.execute("ALTER TABLE hotmail_accounts ADD COLUMN access_method TEXT NOT NULL DEFAULT 'auto'")
             conn.commit()
 
     def import_raw(self, raw_text: str) -> dict:
@@ -75,20 +80,34 @@ class HotmailAccountDb:
                     conn.execute(
                         """
                         UPDATE hotmail_accounts
-                        SET password = ?, client_id = ?, refresh_token = ?, updated_at = ?
+                        SET password = ?, client_id = ?, refresh_token = ?, access_method = ?, updated_at = ?
                         WHERE email = ?
                         """,
-                        (item["password"], item["client_id"], item["refresh_token"], now, item["email"]),
+                        (
+                            item["password"],
+                            item["client_id"],
+                            item["refresh_token"],
+                            item["access_method"],
+                            now,
+                            item["email"],
+                        ),
                     )
                     updated += 1
                 else:
                     conn.execute(
                         """
                         INSERT INTO hotmail_accounts (
-                            email, password, client_id, refresh_token, workflow_status, tags, updated_at
-                        ) VALUES (?, ?, ?, ?, 'pending', '[]', ?)
+                            email, password, client_id, refresh_token, access_method, workflow_status, tags, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 'pending', '[]', ?)
                         """,
-                        (item["email"], item["password"], item["client_id"], item["refresh_token"], now),
+                        (
+                            item["email"],
+                            item["password"],
+                            item["client_id"],
+                            item["refresh_token"],
+                            item["access_method"],
+                            now,
+                        ),
                     )
                     imported += 1
             conn.commit()
@@ -167,6 +186,7 @@ class HotmailAccountDb:
             password=row["password"],
             client_id=row["client_id"],
             refresh_token=row["refresh_token"],
+            access_method=row["access_method"] or "auto",
             workflow_status=row["workflow_status"],
             tags=_parse_tags(row["tags"]),
             openai_password=row["openai_password"],
@@ -192,6 +212,7 @@ class HotmailAccountDb:
                 password=row["password"],
                 client_id=row["client_id"],
                 refresh_token=row["refresh_token"],
+                access_method=row["access_method"] or "auto",
                 workflow_status=row["workflow_status"],
                 tags=_parse_tags(row["tags"]),
                 openai_password=row["openai_password"],
@@ -248,6 +269,7 @@ class HotmailAccountDb:
         tags: list[str] | None = None,
         note: str | None = None,
         openai_password: str | None = None,
+        access_method: str | None = None,
     ) -> StoredAccount | None:
         account = self.get(email)
         if account is None:
@@ -257,6 +279,7 @@ class HotmailAccountDb:
         next_tags = [tag for tag in (tags if tags is not None else account.tags) if str(tag or "").strip()]
         next_note = note if note is not None else account.note
         next_openai_password = openai_password if openai_password is not None else account.openai_password
+        next_access_method = (access_method if access_method is not None else account.access_method).strip() or "auto"
         claimed_at = account.claimed_at
         completed_at = account.completed_at
         if next_status == "pending":
@@ -272,7 +295,7 @@ class HotmailAccountDb:
             conn.execute(
                 """
                 UPDATE hotmail_accounts
-                SET workflow_status = ?, tags = ?, note = ?, openai_password = ?,
+                SET workflow_status = ?, tags = ?, note = ?, openai_password = ?, access_method = ?,
                     claimed_at = ?, completed_at = ?, updated_at = ?
                 WHERE email = ?
                 """,
@@ -281,6 +304,7 @@ class HotmailAccountDb:
                     json.dumps(next_tags, ensure_ascii=False),
                     next_note,
                     next_openai_password,
+                    next_access_method,
                     claimed_at,
                     completed_at,
                     utc_now_iso(),
@@ -368,6 +392,7 @@ def parse_import_lines(raw_text: str) -> list[dict]:
                 "password": password,
                 "client_id": client_id,
                 "refresh_token": refresh_token,
+                "access_method": "auto",
             }
         )
     return parsed

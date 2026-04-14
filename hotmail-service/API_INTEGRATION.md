@@ -55,6 +55,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 - 健康检查：`http://127.0.0.1:8001/health`
 - 抓码接口：`http://127.0.0.1:8001/fetch-code`
 - 直传邮箱抓码：`http://127.0.0.1:8001/fetch-code-direct`
+- 直传邮箱列邮件：`http://127.0.0.1:8001/messages-direct`
 - 释放会话：`http://127.0.0.1:8001/release-session`
 
 ## 4. 健康检查
@@ -241,6 +242,53 @@ Content-Type: application/json
    - 登录状态已失效，系统检测到必须重新登录
    - Microsoft 出现安全挑战，当前会话不可继续使用
 
+## 8.1 直接列邮件
+
+### 请求
+
+```http
+POST /messages-direct
+Content-Type: application/json
+```
+
+### 请求体
+
+与 `POST /fetch-code-direct` 基本一致：
+
+```json
+{
+  "email": "your_email@hotmail.com",
+  "password": "your_password",
+  "client_id": "optional-client-id",
+  "refresh_token": "optional-refresh-token",
+  "access_method": "playwright"
+}
+```
+
+### 返回说明
+
+返回结构与 `graph` 路径统一，包含：
+
+- `status`
+- `email`
+- `access_method`
+- `resolved_method`
+- `available_methods`
+- `supports_listing`
+- `messages`
+- `total_messages`
+
+每封邮件项包含：
+
+- `folder`
+- `subject`
+- `sender`
+- `received_at`
+- `received_at_ms`
+- `preview`
+- `body`
+- `source`
+
 ## 9. 调用示例
 
 ### PowerShell
@@ -305,6 +353,25 @@ resp = requests.post(
         "password": "your_password",
         "max_wait_seconds": 20,
         "poll_interval_seconds": 3,
+    },
+    timeout=180,
+)
+
+print(resp.status_code)
+print(resp.json())
+```
+
+### Python 直传邮箱列邮件
+
+```python
+import requests
+
+resp = requests.post(
+    "http://127.0.0.1:8001/messages-direct",
+    json={
+        "email": "your_email@hotmail.com",
+        "password": "your_password",
+        "access_method": "playwright",
     },
     timeout=180,
 )

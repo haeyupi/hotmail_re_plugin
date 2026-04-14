@@ -3375,13 +3375,16 @@ async function executeStep4(state) {
     const signupTabId = await getTabId('signup-page');
     if (signupTabId) {
       await chrome.tabs.update(signupTabId, { active: true });
-      await sendToContentScript('signup-page', {
+      const fillResult = await sendToContentScript('signup-page', {
         type: 'FILL_CODE',
         step: 4,
         source: 'background',
         reportStepError: false,
         payload: { code: result.code },
       });
+      if (fillResult && fillResult.error) {
+        throw new Error(fillResult.error);
+      }
     } else {
       throw new Error('Signup page tab was closed. Cannot fill verification code.');
     }

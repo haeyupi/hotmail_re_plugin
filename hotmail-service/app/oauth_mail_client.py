@@ -166,6 +166,27 @@ def fetch_code_via_oauth(
     return FetchResult(status="no_code_found", source=method, reason=last_failure_reason)
 
 
+def list_messages_via_oauth(account: Account) -> tuple[str, list[MailMessage]]:
+    method = normalize_access_method(account.access_method)
+    if not can_use_oauth(account):
+        raise ValueError("Missing client_id or refresh_token.")
+
+    last_failure_reason = "No mailbox reader method produced a message list."
+    for reader_method in _resolve_attempt_order(method):
+        reader_result = _fetch_once(account, reader_method)
+        if isinstance(reader_result, FetchResult):
+            last_failure_reason = reader_result.reason or last_failure_reason
+            continue
+        messages = sorted(
+            reader_result,
+            key=lambda item: (item.received_at_ms or 0, 1 if item.folder == "Inbox" else 0),
+            reverse=True,
+        )
+        return reader_method, messages
+
+    raise RuntimeError(last_failure_reason)
+
+
 def _resolve_attempt_order(method: str) -> list[str]:
     if method == "graph":
         return ["graph"]

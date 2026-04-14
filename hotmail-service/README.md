@@ -298,6 +298,14 @@ POST /fetch-code-direct
 }
 ```
 
+### 直接传邮箱列邮件
+
+```http
+POST /messages-direct
+```
+
+返回结构与 `graph` 及 `/accounts/{email}/messages` 一致，适合不依赖本地 DB 时直接读取邮箱列表。
+
 ### 释放会话缓存
 
 ```http
